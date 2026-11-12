@@ -1,0 +1,137 @@
+@import "tailwindcss";
+
+/*
+ * Identidade: "etiqueta de lote" — papel quente, tinta quase preta e amarelo
+ * de sinalização industrial. Cada etapa do fluxo tem a sua cor; verde e
+ * vermelho ficam reservados para LIBERADO e RETIDO.
+ */
+@theme {
+  --font-sans: "Archivo Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, "SFMono-Regular", Menlo, monospace;
+
+  --color-paper: #f3eee4;
+  --color-paper-deep: #e8e1d2;
+  --color-card: #fffdf8;
+  --color-ink: #191b18;
+  --color-ink-2: #474b43;
+  --color-ink-3: #63675d;
+  --color-line: #d8cfbd;
+  --color-hivis: #f2d024;
+
+  --color-prod: #9a4508;
+  --color-prod-soft: #fbead3;
+  --color-qual: #3346b3;
+  --color-qual-soft: #e3e7fb;
+  --color-acab: #0e6f66;
+  --color-acab-soft: #d8f0ec;
+  --color-ok: #17743a;
+  --color-ok-soft: #dcf2e1;
+  --color-stop: #b3261e;
+  --color-stop-soft: #fbe1de;
+
+  --animate-drawer: drawer-in 0.24s cubic-bezier(0.2, 0.8, 0.2, 1);
+  --animate-pop: pop-in 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
+  --animate-stamp: stamp-in 0.35s cubic-bezier(0.2, 1.4, 0.4, 1);
+
+  @keyframes drawer-in {
+    from {
+      transform: translateX(28px);
+      opacity: 0;
+    }
+  }
+  @keyframes pop-in {
+    from {
+      transform: translateY(10px) scale(0.98);
+      opacity: 0;
+    }
+  }
+  @keyframes stamp-in {
+    from {
+      transform: rotate(-2deg) scale(1.25);
+      opacity: 0;
+    }
+  }
+}
+
+/* Títulos em Archivo condensada, como sinalização de fábrica. */
+@utility display {
+  font-stretch: 70%;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+@utility tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background-color: var(--color-paper);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-ink);
+    outline-offset: 2px;
+  }
+
+  .on-dark :focus-visible {
+    outline-color: var(--color-hivis);
+  }
+
+  button:not(:disabled),
+  summary,
+  select,
+  label[for] {
+    cursor: pointer;
+  }
+
+  dialog::backdrop {
+    background: rgb(25 27 24 / 0.55);
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(25 27 24 / 0.25) transparent;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    ::before,
+    ::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@layer components {
+  /* Fundo pontilhado, como uma base de corte. */
+  .mat {
+    background-image: radial-gradient(rgb(25 27 24 / 0.07) 1px, transparent 1px);
+    background-size: 16px 16px;
+  }
+
+  /* Carimbo de liberação da Qualidade. */
+  .stamp {
+    display: inline-flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 8px 12px;
+    border: 2px solid currentColor;
+    border-radius: 6px;
+    outline: 1px solid currentColor;
+    outline-offset: 2px;
+    font-family: var(--font-mono);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    transform: rotate(-2deg);
+  }
+}
