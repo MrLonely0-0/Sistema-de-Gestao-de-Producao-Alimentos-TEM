@@ -208,6 +208,9 @@ export function BatchDrawer({
         <div className="space-y-6">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
             <ProductTag brand={detail.brand} format={detail.format} size="md" />
+            {detail.familyName && (
+              <span className="rounded bg-paper-deep px-2 py-0.5 text-xs font-semibold text-ink-2">{detail.familyName}</span>
+            )}
             <StatusPill status={detail.status} />
             <span className="text-xs text-ink-3">
               Aberta por {detail.createdByName} em {fmtDateTime(detail.createdAt)}

@@ -19,11 +19,19 @@ import {
 } from "@/lib/domain";
 import { api } from "@/lib/client";
 import { Button, cn, ErrorNote, Field, inputCls, Modal, PanelCard, SectionTitle, StatusPill, Switch, useToast, ACCENT_STYLE } from "@/components/ui";
-import type { Run } from "@/components/products-tab";
+import { MultiFormatSettingCard, type Run } from "@/components/products-tab";
 
 type Dialog = { kind: "create" } | { kind: "edit"; column: ColumnDTO } | { kind: "delete"; column: ColumnDTO } | null;
 
-export function ColumnsTab({ columns, run }: { columns: ColumnDTO[]; run: Run }) {
+export function ColumnsTab({
+  columns,
+  allowMultiFormatBatch,
+  run,
+}: {
+  columns: ColumnDTO[];
+  allowMultiFormatBatch: boolean;
+  run: Run;
+}) {
   const toast = useToast();
   const [dialog, setDialog] = useState<Dialog>(null);
   const [busy, setBusy] = useState(false);
@@ -59,6 +67,8 @@ export function ColumnsTab({ columns, run }: { columns: ColumnDTO[]; run: Run })
 
   return (
     <div className="space-y-5">
+      <MultiFormatSettingCard allowMultiFormatBatch={allowMultiFormatBatch} run={run} />
+
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <SectionTitle>Painéis ativos</SectionTitle>

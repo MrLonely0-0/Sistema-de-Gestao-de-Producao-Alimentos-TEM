@@ -131,7 +131,7 @@ export function Board({ user }: { user: SessionUser }) {
     for (const b of board?.batches ?? []) {
       if (brand !== "todas" && b.brand !== brand) continue;
       if (q) {
-        const haystack = `${b.number} ${b.brand} ${b.format} ${b.garlicLot ?? ""} ${b.preservativeLot ?? ""}`.toLowerCase();
+        const haystack = `${b.number} ${b.brand} ${b.format} ${b.familyName ?? ""} ${b.garlicLot ?? ""} ${b.preservativeLot ?? ""}`.toLowerCase();
         if (!haystack.includes(q)) continue;
       }
       const column = columns.find((c) => c.statuses.includes(b.status));
@@ -398,11 +398,25 @@ export function Board({ user }: { user: SessionUser }) {
         />
       )}
 
-      {dialog?.type === "form" && board && <BatchForm batch={dialog.batch} products={board.products} onClose={() => setDialog(null)} onDone={done} />}
+      {dialog?.type === "form" && board && (
+        <BatchForm
+          batch={dialog.batch}
+          products={board.products}
+          dimensions={board.dimensions}
+          allowMultiFormatBatch={board.allowMultiFormatBatch}
+          onClose={() => setDialog(null)}
+          onDone={done}
+        />
+      )}
       {dialog?.type === "release" && <ReleaseDialog batch={dialog.batch} onClose={() => setDialog(null)} onDone={done} />}
       {dialog?.type === "reason" && <ReasonDialog batch={dialog.batch} action={dialog.action} onClose={() => setDialog(null)} onDone={done} />}
       {dialog?.type === "finish" && board && (
-        <FinishDialog batch={dialog.batch} product={board.products.find((p) => p.id === dialog.batch.productId)} onClose={() => setDialog(null)} onDone={done} />
+        <FinishDialog
+          batch={dialog.batch}
+          products={board.products.filter((p) => dialog.batch.productIds.includes(p.id))}
+          onClose={() => setDialog(null)}
+          onDone={done}
+        />
       )}
       {dialog?.type === "ship" && board && <ShipDialog stock={board.stock} onClose={() => setDialog(null)} onDone={done} />}
     </div>

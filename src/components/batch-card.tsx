@@ -77,11 +77,16 @@ export function BatchCard({
             type="button"
             onClick={onOpen}
             aria-label={`Abrir batelada ${batch.number}, ${batch.brand} ${batch.format}`}
-            className="rounded text-left after:absolute after:inset-0"
+            className="shrink-0 rounded text-left after:absolute after:inset-0"
           >
             <span className="display tnum block text-[32px]">#{batch.number}</span>
           </button>
-          <ProductTag brand={batch.brand} format={batch.format} />
+          <div className="flex min-w-0 flex-col items-end gap-1">
+            <ProductTag brand={batch.brand} format={batch.format} />
+            {batch.familyName && (
+              <span className="truncate text-[10px] font-semibold uppercase tracking-wide text-ink-3">{batch.familyName}</span>
+            )}
+          </div>
         </div>
 
         <div className="mt-2 flex items-center justify-between gap-2">

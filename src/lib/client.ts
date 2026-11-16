@@ -188,7 +188,7 @@ export async function api<T = unknown>(
     throw new HttpError(res.status, data?.error ?? "Não foi possível concluir a operação.");
   }
   const method = (opts.method ?? "GET").toUpperCase();
-  if (typeof window !== "undefined" && method !== "GET" && /^\/api\/(batches|stock|shipments|admin\/(products|data))/.test(url)) {
+  if (typeof window !== "undefined" && method !== "GET" && /^\/api\/(batches|stock|shipments|admin\/(products|data|settings|columns))/.test(url)) {
     window.dispatchEvent(new Event("tem:data-changed"));
   }
   return data as T;

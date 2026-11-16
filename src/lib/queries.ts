@@ -1,10 +1,12 @@
 import { and, asc, count, desc, eq, inArray, isNotNull, isNull, ne, sum } from "drizzle-orm";
 import { db } from "@/db";
 import {
+  appState,
   attachments,
   batches,
   batchEvents,
   batchOutputs,
+  batchProducts,
   packagingOptions,
   productClassifications,
   productDimensionValues,
@@ -38,7 +40,7 @@ import type {
   StockManageDTO,
   StockRowDTO,
 } from "@/lib/domain";
-import { STATUSES, STATUS_LABEL, avatarUrl } from "@/lib/domain";
+import { FAMILY_SLUG, findFamilyDimension, STATUSES, STATUS_LABEL, avatarUrl } from "@/lib/domain";
 
 type BatchRow = typeof batches.$inferSelect;
 type ProductRow = typeof products.$inferSelect;
@@ -126,16 +128,30 @@ export function toProductDTOs(catalog: Catalog): ProductDTO[] {
 
 /** Nome do valor de uma dimensão (por slug) para um produto. */
 function dimensionName(catalog: Catalog, productId: number, slug: string): string | null {
-  const dimension = catalog.dimensions.find((d) => d.slug === slug);
+  const dimension =
+    slug === FAMILY_SLUG
+      ? findFamilyDimension(catalog.dimensions)
+      : catalog.dimensions.find((d) => d.slug === slug);
   if (!dimension) return null;
   const row = catalog.classifications.find((c) => c.productId === productId && c.dimensionId === dimension.id);
   return dimension.values.find((v) => v.id === row?.valueId)?.name ?? null;
 }
 
-function toBatchDTO(b: BatchRow, outputs: OutputDTO[], attachmentCount: number): BatchDTO {
+function toBatchDTO(
+  b: BatchRow,
+  outputs: OutputDTO[],
+  attachmentCount: number,
+  items: Array<{ productId: number; format: string }>,
+  familyName: string | null,
+): BatchDTO {
+  const productIds = items.length > 0 ? items.map((x) => x.productId) : [b.productId];
+  const formats = items.length > 0 ? items.map((x) => x.format) : [b.format];
   return {
     id: b.id,
     productId: b.productId,
+    productIds,
+    formats,
+    familyName,
     number: b.number,
     brand: b.brand,
     format: b.format,
@@ -172,18 +188,28 @@ function toBatchDTO(b: BatchRow, outputs: OutputDTO[], attachmentCount: number):
   };
 }
 
-async function hydrate(rows: BatchRow[]): Promise<BatchDTO[]> {
+async function hydrate(rows: BatchRow[], catalog?: Catalog): Promise<BatchDTO[]> {
   if (rows.length === 0) return [];
   const ids = rows.map((r) => r.id);
-  const [outputRows, countRows] = await Promise.all([
+  const [outputRows, countRows, batchProductRows, cat] = await Promise.all([
     db.select().from(batchOutputs).where(inArray(batchOutputs.batchId, ids)).orderBy(asc(batchOutputs.unitsPerBox)),
     db
       .select({ batchId: attachments.batchId, n: count() })
       .from(attachments)
       .where(inArray(attachments.batchId, ids))
       .groupBy(attachments.batchId),
+    db
+      .select({ batchId: batchProducts.batchId, productId: batchProducts.productId, format: batchProducts.format })
+      .from(batchProducts)
+      .where(inArray(batchProducts.batchId, ids))
+      .orderBy(asc(batchProducts.id)),
+    catalog ? Promise.resolve(catalog) : loadCatalog(true),
   ]);
   const counts = new Map(countRows.map((c) => [c.batchId, c.n]));
+  const itemsByBatch = new Map<number, Array<{ productId: number; format: string }>>();
+  for (const r of batchProductRows) {
+    itemsByBatch.set(r.batchId, [...(itemsByBatch.get(r.batchId) ?? []), { productId: r.productId, format: r.format }]);
+  }
   return rows.map((b) =>
     toBatchDTO(
       b,
@@ -191,6 +217,8 @@ async function hydrate(rows: BatchRow[]): Promise<BatchDTO[]> {
         .filter((o) => o.batchId === b.id)
         .map((o) => ({ packagingOptionId: o.packagingOptionId, label: o.label, unitsPerBox: o.unitsPerBox, boxes: o.boxes })),
       counts.get(b.id) ?? 0,
+      itemsByBatch.get(b.id) ?? [],
+      dimensionName(cat, b.productId, FAMILY_SLUG),
     ),
   );
 }
@@ -198,7 +226,7 @@ async function hydrate(rows: BatchRow[]): Promise<BatchDTO[]> {
 /** Tudo o que o painel Kanban precisa, em uma chamada. */
 export async function getBoard(): Promise<BoardDTO> {
   const alive = isNull(batches.deletedAt);
-  const [catalog, columns, openRows, stockedRows, stockedCount, stock, shipmentRows] = await Promise.all([
+  const [catalog, columns, openRows, stockedRows, stockedCount, stock, shipmentRows, stateRows] = await Promise.all([
     loadCatalog(),
     loadColumns(),
     db.select().from(batches).where(and(alive, ne(batches.status, "em_estoque"))).orderBy(asc(batches.createdAt)),
@@ -223,12 +251,15 @@ export async function getBoard(): Promise<BoardDTO> {
       .innerJoin(products, eq(products.id, packagingOptions.productId))
       .orderBy(desc(shipments.createdAt))
       .limit(5),
+    db.select({ allowMultiFormatBatch: appState.allowMultiFormatBatch }).from(appState).where(eq(appState.id, "lifecycle")),
   ]);
 
   return {
     columns,
-    batches: await hydrate([...openRows, ...stockedRows]),
+    batches: await hydrate([...openRows, ...stockedRows], catalog),
     products: toProductDTOs(catalog).filter((p) => p.active),
+    dimensions: catalog.dimensions,
+    allowMultiFormatBatch: stateRows[0]?.allowMultiFormatBatch ?? true,
     stock,
     shipments: shipmentRows.map((s) => ({
       id: s.id,
@@ -277,7 +308,7 @@ export async function getBatchDetail(id: number): Promise<BatchDetailDTO | null>
 }
 
 export async function getAdminOverview(): Promise<AdminOverviewDTO> {
-  const [userRows, profileRows, catalog, columns, folderRows, folderCount, attachmentCounts] = await Promise.all([
+  const [userRows, profileRows, catalog, columns, folderRows, folderCount, attachmentCounts, stateRows] = await Promise.all([
     db.select().from(users).where(isNull(users.deletedAt)).orderBy(asc(users.id)),
     db.select().from(accessProfiles).where(isNull(accessProfiles.deletedAt)).orderBy(asc(accessProfiles.id)),
     loadCatalog(),
@@ -298,6 +329,7 @@ export async function getAdminOverview(): Promise<AdminOverviewDTO> {
       .limit(15),
     db.select({ n: count() }).from(batches).where(isNotNull(batches.driveFolderId)),
     db.select({ batchId: attachments.batchId, n: count() }).from(attachments).groupBy(attachments.batchId),
+    db.select({ allowMultiFormatBatch: appState.allowMultiFormatBatch }).from(appState).where(eq(appState.id, "lifecycle")),
   ]);
   const perBatch = new Map(attachmentCounts.map((a) => [a.batchId, a.n]));
 
@@ -324,6 +356,7 @@ export async function getAdminOverview(): Promise<AdminOverviewDTO> {
     products: toProductDTOs(catalog),
     dimensions: catalog.dimensions,
     columns,
+    allowMultiFormatBatch: stateRows[0]?.allowMultiFormatBatch ?? true,
     drive: {
       mode: DRIVE_MODE,
       root: DRIVE_ROOT,
@@ -356,9 +389,10 @@ function inPeriod(isoDate: string, filters: ReportFilters): boolean {
 /** Agrega em memória (volume de chão de fábrica é pequeno) para manter uma única consulta por tabela. */
 export async function getReports(filters: ReportFilters): Promise<ReportsDTO> {
   await tagLegacyDemo();
-  const [catalog, batchRows, outputRows, optionRows, productRows, shipmentRows, attachmentRows, adjustmentRows] = await Promise.all([
+  const [catalog, batchRows, batchProductRows, outputRows, optionRows, productRows, shipmentRows, attachmentRows, adjustmentRows] = await Promise.all([
     loadCatalog(true),
     db.select().from(batches).orderBy(asc(batches.createdAt)),
+    db.select().from(batchProducts),
     db.select().from(batchOutputs),
     db.select().from(packagingOptions),
     db.select().from(products),
@@ -371,12 +405,17 @@ export async function getReports(filters: ReportFilters): Promise<ReportsDTO> {
   const optionById = new Map(optionRows.map((o) => [o.id, o]));
   const attachmentCount = new Map<number, number>();
   for (const a of attachmentRows) attachmentCount.set(a.batchId, (attachmentCount.get(a.batchId) ?? 0) + 1);
+  const batchProductsMap = new Map<number, number[]>();
+  for (const bp of batchProductRows) {
+    batchProductsMap.set(bp.batchId, [...(batchProductsMap.get(bp.batchId) ?? []), bp.productId]);
+  }
 
   const eligible = batchRows.filter((b) => {
     if (b.deletedAt && !filters.includeDeleted) return false;
     if (!inPeriod(b.createdAt.toISOString(), filters)) return false;
     if (filters.brand && b.brand !== filters.brand) return false;
-    if (filters.productId && b.productId !== filters.productId) return false;
+    const pids = batchProductsMap.get(b.id) ?? [b.productId];
+    if (filters.productId && !pids.includes(filters.productId)) return false;
     if (filters.status && b.status !== filters.status) return false;
     return true;
   });
@@ -387,7 +426,7 @@ export async function getReports(filters: ReportFilters): Promise<ReportsDTO> {
     outputsByBatch.set(o.batchId, [...(outputsByBatch.get(o.batchId) ?? []), o]);
   }
 
-  const hydrated = await hydrate(eligible);
+  const hydrated = await hydrate(eligible, catalog);
   const rows: ReportBatchRow[] = hydrated.map((b) => {
     const outs = outputsByBatch.get(b.id) ?? [];
     const producedBoxes = outs.reduce((acc, o) => acc + o.boxes, 0);
@@ -409,30 +448,67 @@ export async function getReports(filters: ReportFilters): Promise<ReportsDTO> {
 
   /* Por produto */
   const productAgg = new Map<number, ReportProductRow>();
+  const ensureProductAgg = (pid: number) => {
+    const existing = productAgg.get(pid);
+    if (existing) return existing;
+    const p = productById.get(pid);
+    if (!p) return null;
+    const fresh: ReportProductRow = {
+      productId: pid,
+      brand: p.brand,
+      format: p.format,
+      batches: 0,
+      goodUnits: 0,
+      lossUnits: 0,
+      yieldPct: null,
+      boxes: 0,
+      released: 0,
+      retained: 0,
+    };
+    productAgg.set(pid, fresh);
+    return fresh;
+  };
   for (const r of rows) {
-    const p = productById.get(r.productId);
-    if (!p) continue;
-    const agg =
-      productAgg.get(r.productId) ??
-      ({
-        productId: r.productId,
-        brand: p.brand,
-        format: p.format,
-        batches: 0,
-        goodUnits: 0,
-        lossUnits: 0,
-        yieldPct: null,
-        boxes: 0,
-        released: 0,
-        retained: 0,
-      } satisfies ReportProductRow);
-    agg.batches += 1;
-    agg.goodUnits += r.goodUnits ?? 0;
-    agg.lossUnits += r.lossUnits ?? 0;
-    agg.boxes += r.producedBoxes;
-    if (r.releasedAt) agg.released += 1;
-    if (r.heldAt || r.status === "retido") agg.retained += 1;
-    productAgg.set(r.productId, agg);
+    const targetIds = filters.productId ? [filters.productId] : r.productIds;
+    if (r.productIds.length <= 1) {
+      const agg = ensureProductAgg(r.productId);
+      if (!agg) continue;
+      agg.batches += 1;
+      agg.goodUnits += r.goodUnits ?? 0;
+      agg.lossUnits += r.lossUnits ?? 0;
+      agg.boxes += r.producedBoxes;
+      if (r.releasedAt) agg.released += 1;
+      if (r.heldAt || r.status === "retido") agg.retained += 1;
+      continue;
+    }
+
+    const outs = outputsByBatch.get(r.id) ?? [];
+    const boxesByPid = new Map<number, number>();
+    const unitsByPid = new Map<number, number>();
+    let totalOutUnits = 0;
+    for (const o of outs) {
+      const pid = optionById.get(o.packagingOptionId)?.productId ?? r.productId;
+      boxesByPid.set(pid, (boxesByPid.get(pid) ?? 0) + o.boxes);
+      const u = o.boxes * o.unitsPerBox;
+      unitsByPid.set(pid, (unitsByPid.get(pid) ?? 0) + u);
+      totalOutUnits += u;
+    }
+    for (const pid of targetIds) {
+      const agg = ensureProductAgg(pid);
+      if (!agg) continue;
+      agg.batches += 1;
+      agg.boxes += boxesByPid.get(pid) ?? 0;
+      if (totalOutUnits > 0) {
+        const share = (unitsByPid.get(pid) ?? 0) / totalOutUnits;
+        agg.goodUnits += Math.round((r.goodUnits ?? 0) * share);
+        agg.lossUnits += Math.round((r.lossUnits ?? 0) * share);
+      } else if (pid === r.productId) {
+        agg.goodUnits += r.goodUnits ?? 0;
+        agg.lossUnits += r.lossUnits ?? 0;
+      }
+      if (r.releasedAt) agg.released += 1;
+      if (r.heldAt || r.status === "retido") agg.retained += 1;
+    }
   }
   const productReport = [...productAgg.values()]
     .map((p) => ({
@@ -558,10 +634,13 @@ export async function getStockManage(): Promise<StockManageDTO> {
       .orderBy(desc(shipments.createdAt), desc(shipments.id)).limit(100),
     db.select({
       id: batchOutputs.id, batchId: batches.id, batchNumber: batches.number,
-      brand: batches.brand, format: batches.format, label: batchOutputs.label,
+      brand: products.brand, format: products.format, label: batchOutputs.label,
       unitsPerBox: batchOutputs.unitsPerBox, boxes: batchOutputs.boxes,
       finishedAt: batches.finishedAt, finishedByName: batches.finishedByName,
-    }).from(batchOutputs).innerJoin(batches, eq(batches.id, batchOutputs.batchId))
+    }).from(batchOutputs)
+      .innerJoin(batches, eq(batches.id, batchOutputs.batchId))
+      .innerJoin(packagingOptions, eq(packagingOptions.id, batchOutputs.packagingOptionId))
+      .innerJoin(products, eq(products.id, packagingOptions.productId))
       .where(eq(batches.status, "em_estoque"))
       .orderBy(desc(batches.finishedAt), desc(batchOutputs.id)).limit(100),
   ]);

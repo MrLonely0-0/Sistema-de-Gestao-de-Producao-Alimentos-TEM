@@ -144,6 +144,7 @@ export const appState = pgTable("app_state", {
   demoCleanedByName: text("demo_cleaned_by_name"),
   demoRemovedBatches: integer("demo_removed_batches").notNull().default(0),
   demoRemovedShipments: integer("demo_removed_shipments").notNull().default(0),
+  allowMultiFormatBatch: boolean("allow_multi_format_batch").notNull().default(true),
 });
 
 export const sessions = pgTable("sessions", {
@@ -317,6 +318,23 @@ export const batches = pgTable(
     uniqueIndex("batches_product_number_uq").on(t.productId, t.number),
     index("batches_status_idx").on(t.status),
   ],
+);
+
+/** Produtos/gramaturas incluídos em cada batelada (suporta 1 ou várias gramaturas da mesma marca/família). */
+export const batchProducts = pgTable(
+  "batch_products",
+  {
+    id: serial("id").primaryKey(),
+    batchId: integer("batch_id")
+      .notNull()
+      .references(() => batches.id, { onDelete: "cascade" }),
+    productId: integer("product_id")
+      .notNull()
+      .references(() => products.id),
+    brand: text("brand").notNull(),
+    format: text("format").notNull(),
+  },
+  (t) => [uniqueIndex("batch_products_batch_product_uq").on(t.batchId, t.productId)],
 );
 
 export const batchOutputs = pgTable(

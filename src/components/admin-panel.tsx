@@ -97,8 +97,17 @@ export function AdminPanel({ me, initialSection }: { me: SessionUser; initialSec
               <div className="h-52 animate-pulse rounded-xl bg-ink/8" />
             </div>
           )}
-          {data && tab === "produtos" && <ProductsTab products={data.products} dimensions={data.dimensions} run={run} />}
-          {data && tab === "painéis" && <ColumnsTab columns={data.columns} run={run} />}
+          {data && tab === "produtos" && (
+            <ProductsTab
+              products={data.products}
+              dimensions={data.dimensions}
+              allowMultiFormatBatch={data.allowMultiFormatBatch}
+              run={run}
+            />
+          )}
+          {data && tab === "painéis" && (
+            <ColumnsTab columns={data.columns} allowMultiFormatBatch={data.allowMultiFormatBatch} run={run} />
+          )}
           {data && tab === "perfis" && <ProfilesTab profiles={data.profiles} run={run} />}
           {data && tab === "usuarios" && <UsersTab users={data.users} profiles={data.profiles} me={me} onChanged={load} />}
           {data && tab === "drive" && <DriveTab drive={data.drive} />}

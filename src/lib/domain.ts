@@ -320,6 +320,12 @@ export interface OutputDTO {
 export interface BatchDTO {
   id: number;
   productId: number;
+  /** Lista de produtos/gramaturas incluídos na batelada (sempre ao menos 1). */
+  productIds: number[];
+  /** Formatos individuais ordenados (ex.: ["160 g", "450 g"]). */
+  formats: string[];
+  /** Família do produto quando classificada. */
+  familyName?: string | null;
   number: number;
   brand: string;
   format: string;
@@ -458,6 +464,8 @@ export interface BoardDTO {
   columns: ColumnDTO[];
   batches: BatchDTO[];
   products: ProductDTO[];
+  dimensions: DimensionDTO[];
+  allowMultiFormatBatch: boolean;
   stock: StockRowDTO[];
   shipments: ShipmentDTO[];
   stockedTotal: number;
@@ -506,6 +514,17 @@ export interface DriveFolderDTO {
 }
 
 export const BRAND_SLUG = "marca";
+export const FAMILY_SLUG = "familia";
+
+/** Localiza a dimensão "Família" mesmo se o gestor a tiver renomeado ou criado manualmente. */
+export function findFamilyDimension(dimensions: readonly DimensionDTO[]): DimensionDTO | undefined {
+  return (
+    dimensions.find((d) => d.slug === FAMILY_SLUG) ??
+    dimensions.find(
+      (d) => d.name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase() === FAMILY_SLUG,
+    )
+  );
+}
 
 /* ───────────── Relatórios e exportação ───────────── */
 
@@ -650,6 +669,7 @@ export interface AdminOverviewDTO {
   products: ProductDTO[];
   dimensions: DimensionDTO[];
   columns: ColumnDTO[];
+  allowMultiFormatBatch: boolean;
   drive: {
     mode: "simulado";
     root: string;

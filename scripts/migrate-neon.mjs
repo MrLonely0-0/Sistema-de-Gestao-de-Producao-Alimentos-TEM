@@ -317,6 +317,28 @@ async function run() {
       await client.query(`ALTER TABLE public.access_profiles ADD COLUMN IF NOT EXISTS deleted_at timestamptz, ADD COLUMN IF NOT EXISTS deleted_by_name text`);
     }
 
+    // 9) Suporte a múltiplas gramaturas por batelada + opção configurável no Admin
+    if ((await tableExists(client, "app_state")) && !(await columnExists(client, "app_state", "allow_multi_format_batch"))) {
+      console.log("• Adicionando app_state.allow_multi_format_batch...");
+      await client.query(`ALTER TABLE public.app_state ADD COLUMN IF NOT EXISTS allow_multi_format_batch boolean NOT NULL DEFAULT true`);
+    }
+    if ((await tableExists(client, "batches")) && !(await tableExists(client, "batch_products"))) {
+      console.log("• Criando tabela batch_products...");
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS public.batch_products (
+          id serial PRIMARY KEY,
+          batch_id integer NOT NULL REFERENCES public.batches(id) ON DELETE CASCADE,
+          product_id integer NOT NULL REFERENCES public.products(id),
+          brand text NOT NULL,
+          format text NOT NULL
+        )
+      `);
+      await client.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS batch_products_batch_product_uq
+        ON public.batch_products (batch_id, product_id)
+      `);
+    }
+
     await client.query("COMMIT");
     console.log("✓ Pré-migração do Neon concluída com segurança. Execute agora: npx drizzle-kit push");
   } catch (err) {

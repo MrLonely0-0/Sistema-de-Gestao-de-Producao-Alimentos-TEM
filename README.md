@@ -40,6 +40,7 @@ A escrita na API aceita como prova de origem `Origin`/`Referer` do mesmo host, `
 Regras que o servidor garante (não só a tela):
 
 - **Última alteração registrada em cada card** (nome, perfil de acesso e data/hora) e histórico por evento com o perfil de quem agiu. Na gaveta, o usuário vê também o seu último registro naquela batelada.
+- **Seleção em cascata e múltiplas gramaturas**: na abertura da batelada, o operador escolhe primeiro a **Marca**, depois a **Família** (incluindo novas famílias cadastradas no Admin) e então marca uma ou mais **gramaturas** compatíveis (ex.: `160 g + 450 g`). Essa opção de marcar várias gramaturas pode ser habilitada ou desabilitada a qualquer momento em **Admin › Produtos e classificações** ou **Admin › Painéis do quadro** (`PATCH /api/admin/settings`).
 - **Numeração sequencial por item** (`#1`, `#2`… por marca + formato), gerada com incremento atômico no banco — duas bateladas simultâneas nunca recebem o mesmo número.
 - **Pronto** só com todos os dados: 2 lotes, 6 horários (fim ≥ início) e unidades boas/perdas.
 - **Carimbo de liberação**: gravado com o relógio do banco, uma única vez. Um *trigger* no Postgres rejeita qualquer alteração posterior, inclusive via SQL direto.

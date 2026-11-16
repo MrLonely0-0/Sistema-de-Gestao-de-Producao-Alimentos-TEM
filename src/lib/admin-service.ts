@@ -3,6 +3,7 @@ import { z } from "zod";
 import { db } from "@/db";
 import {
   batches,
+  batchProducts,
   packagingOptions,
   productClassifications,
   productDimensionValues,
@@ -139,6 +140,7 @@ export async function syncBrand(tx: Tx, productId: number, newBrand: string): Pr
     throw e;
   }
   await tx.update(batches).set({ brand: newBrand }).where(eq(batches.productId, productId));
+  await tx.update(batchProducts).set({ brand: newBrand }).where(eq(batchProducts.productId, productId));
 }
 
 /* ───────────── Dimensões ("tipos de separação") ───────────── */
@@ -324,14 +326,22 @@ export async function deleteProduct(user: SessionUser, productId: number) {
     const [product] = await tx.select().from(products).where(eq(products.id, productId));
     if (!product) throw new ApiError(404, "Produto não encontrado.");
     if (product.deletedAt) throw new ApiError(409, "Este produto já foi excluído.");
-    const [open] = await tx
-      .select({ n: count() })
-      .from(batches)
-      .where(and(eq(batches.productId, productId), isNull(batches.deletedAt), ne(batches.status, "em_estoque")));
-    if ((open?.n ?? 0) > 0) {
+    const [directOpen, linkedOpen] = await Promise.all([
+      tx
+        .select({ id: batches.id })
+        .from(batches)
+        .where(and(eq(batches.productId, productId), isNull(batches.deletedAt), ne(batches.status, "em_estoque"))),
+      tx
+        .select({ id: batches.id })
+        .from(batchProducts)
+        .innerJoin(batches, eq(batches.id, batchProducts.batchId))
+        .where(and(eq(batchProducts.productId, productId), isNull(batches.deletedAt), ne(batches.status, "em_estoque"))),
+    ]);
+    const openCount = new Set([...directOpen.map((b) => b.id), ...linkedOpen.map((b) => b.id)]).size;
+    if (openCount > 0) {
       throw new ApiError(
         409,
-        `Há ${open!.n} batelada(s) em andamento deste produto. Exclua ou finalize as bateladas antes de excluir o produto.`,
+        `Há ${openCount} batelada(s) em andamento deste produto. Exclua ou finalize as bateladas antes de excluir o produto.`,
       );
     }
     await tx

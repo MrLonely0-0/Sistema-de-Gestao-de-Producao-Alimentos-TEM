@@ -1,7 +1,18 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "@/db";
-import { attachments, batches, batchEvents, batchOutputs, products, shipments } from "@/db/schema";
+import {
+  appState,
+  attachments,
+  batches,
+  batchEvents,
+  batchOutputs,
+  batchProducts,
+  productClassifications,
+  productDimensions,
+  products,
+  shipments,
+} from "@/db/schema";
 import { ApiError } from "@/lib/api";
 import { ensureInventoryItems, lockStockOptions, receiveProduction, requireLiveStock, stockBalance, touchStock } from "@/lib/inventory-ledger";
 import { assertFeature } from "@/lib/columns";
@@ -11,6 +22,7 @@ import {
   type ColumnFeature,
   can,
   canAttach,
+  FAMILY_SLUG,
   missingForReady,
   STATUS_LABEL,
   timeOrderErrors,
@@ -61,7 +73,18 @@ const productionSchema = z.object({
   markReady: z.boolean().optional(),
 });
 
-const createSchema = productionSchema.extend({ productId: z.number().int().positive() });
+const createSchema = productionSchema
+  .extend({
+    productId: z.number().int().positive().optional(),
+    productIds: z
+      .array(z.number().int().positive())
+      .min(1, "Escolha ao menos uma gramatura.")
+      .max(20, "Selecione no máximo 20 gramaturas por batelada.")
+      .optional(),
+  })
+  .refine((d) => d.productId !== undefined || (d.productIds && d.productIds.length > 0), {
+    message: "Escolha o produto e a gramatura.",
+  });
 
 const reason = (label: string) =>
   z.string().trim().min(3, `Informe o motivo da ${label}.`).max(500, "Use no máximo 500 caracteres.");
@@ -80,8 +103,8 @@ const transitionSchema = z.discriminatedUnion("action", [
           boxes: z.number().int("Use números inteiros de caixas.").min(1, "Informe ao menos 1 caixa.").max(1_000_000),
         }),
       )
-      .min(1, "Escolha de 1 a 3 embalagens de saída.")
-      .max(3, "Escolha de 1 a 3 embalagens de saída."),
+      .min(1, "Escolha ao menos 1 embalagem de saída.")
+      .max(20, "Escolha no máximo 20 embalagens de saída."),
   }),
 ]);
 
@@ -148,12 +171,21 @@ function audit(user: SessionUser, now = new Date()) {
   };
 }
 
+/** Converte "160 g", "1 kg"… em número para manter a ordem das gramaturas consistente. */
+function weightOf(format: string): number {
+  const m = format.replace(",", ".").match(/([\d.]+)\s*(kg|g|ml|l)\b/i);
+  if (!m) return Number.MAX_SAFE_INTEGER;
+  const value = parseFloat(m[1]);
+  return /^(kg|l)$/i.test(m[2]) ? value * 1000 : value;
+}
+
 /* ───────────── Etapa 1 · Produção ───────────── */
 
 export async function createBatch(user: SessionUser, raw: unknown): Promise<{ id: number; number: number }> {
   assertCan(user, "criar");
   await assertFeature("criar", "em_preparo");
-  const { productId, markReady, ...data } = createSchema.parse(raw);
+  const { productId, productIds: rawIds, markReady, ...data } = createSchema.parse(raw);
+  const requestedIds = [...new Set(rawIds ?? (productId !== undefined ? [productId] : []))];
   assertConsistent(data);
   if (markReady) {
     await assertFeature("marcar_pronto", "em_preparo");
@@ -161,27 +193,71 @@ export async function createBatch(user: SessionUser, raw: unknown): Promise<{ id
   }
 
   return db.transaction(async (tx) => {
-    // Incremento atômico: o UPDATE trava a linha do produto, então duas
+    if (requestedIds.length > 1) {
+      const [state] = await tx
+        .select({ allow: appState.allowMultiFormatBatch })
+        .from(appState)
+        .where(eq(appState.id, "lifecycle"));
+      if (state && !state.allow) {
+        throw new ApiError(400, "A seleção de várias gramaturas na mesma batelada está desabilitada pelo administrador.");
+      }
+    }
+
+    const selected = await tx
+      .select()
+      .from(products)
+      .where(and(inArray(products.id, requestedIds), eq(products.active, true), isNull(products.deletedAt)));
+    if (selected.length !== requestedIds.length) {
+      throw new ApiError(404, "Produto não encontrado ou inativo.");
+    }
+    const brands = new Set(selected.map((p) => p.brand));
+    if (brands.size > 1) {
+      throw new ApiError(400, "Selecione gramaturas da mesma marca na mesma batelada.");
+    }
+
+    if (selected.length > 1) {
+      const dims = await tx.select().from(productDimensions);
+      const familyDim =
+        dims.find((d) => d.slug === FAMILY_SLUG) ??
+        dims.find((d) => d.name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase() === FAMILY_SLUG);
+      if (familyDim?.active) {
+        const classRows = await tx
+          .select()
+          .from(productClassifications)
+          .where(and(inArray(productClassifications.productId, requestedIds), eq(productClassifications.dimensionId, familyDim.id)));
+        const byProduct = new Map(classRows.map((c) => [c.productId, c.valueId]));
+        const familySet = new Set(requestedIds.map((pid) => byProduct.get(pid) ?? null));
+        if (familySet.size > 1) {
+          throw new ApiError(400, "Selecione gramaturas da mesma família na mesma batelada.");
+        }
+      }
+    }
+
+    const ordered = [...selected].sort((a, b) => weightOf(a.format) - weightOf(b.format) || a.id - b.id);
+    const primaryTarget = ordered[0];
+    const combinedFormat = ordered.map((p) => p.format).join(" + ");
+
+    // Incremento atômico: o UPDATE trava a linha do produto principal, então duas
     // bateladas simultâneas do mesmo item nunca recebem o mesmo número.
     const [product] = await tx
       .update(products)
       .set({ batchCounter: sql`${products.batchCounter} + 1` })
-      .where(and(eq(products.id, productId), eq(products.active, true)))
+      .where(and(eq(products.id, primaryTarget.id), eq(products.active, true), isNull(products.deletedAt)))
       .returning();
     if (!product) throw new ApiError(404, "Produto não encontrado ou inativo.");
 
     const number = product.batchCounter;
-    const folder = await createBatchFolder({ brand: product.brand, format: product.format, number });
+    const folder = await createBatchFolder({ brand: product.brand, format: combinedFormat, number });
     const now = new Date();
 
     const [batch] = await tx
       .insert(batches)
       .values({
         ...data,
-        productId,
+        productId: product.id,
         number,
         brand: product.brand,
-        format: product.format,
+        format: combinedFormat,
         status: markReady ? "pronto" : "em_preparo",
         readyAt: markReady ? now : null,
         createdById: user.id,
@@ -192,7 +268,17 @@ export async function createBatch(user: SessionUser, raw: unknown): Promise<{ id
       })
       .returning({ id: batches.id });
 
-    await logEvent(tx, batch.id, "criada", `Batelada #${number} aberta em "Em preparo".`, user);
+    await tx.insert(batchProducts).values(
+      ordered.map((p) => ({
+        batchId: batch.id,
+        productId: p.id,
+        brand: p.brand,
+        format: p.format,
+      })),
+    );
+
+    const suffix = ordered.length > 1 ? ` (${combinedFormat})` : "";
+    await logEvent(tx, batch.id, "criada", `Batelada #${number} aberta em "Em preparo"${suffix}.`, user);
     await logEvent(tx, batch.id, "drive", `Pasta criada no Drive (simulado): ${folder.path}`, user);
     if (markReady) await logEvent(tx, batch.id, "pronto", "Marcada como Pronto e enviada à Qualidade.", user);
     return { id: batch.id, number };
@@ -296,10 +382,22 @@ export async function transitionBatch(user: SessionUser, id: number, raw: unknow
         if (new Set(ids).size !== ids.length) {
           throw new ApiError(400, "Cada embalagem só pode ser escolhida uma vez.");
         }
-        const options = await lockStockOptions(tx, ids);
-        if (options.some((o) => o.productId !== batch.productId || !o.active)) {
-          throw new ApiError(400, "Há uma embalagem que não está vinculada a este produto. Atualize a página.");
+        const batchProductRows = await tx
+          .select({ productId: batchProducts.productId, format: batchProducts.format })
+          .from(batchProducts)
+          .where(eq(batchProducts.batchId, id))
+          .orderBy(asc(batchProducts.id));
+        const allowedProductIds = batchProductRows.length > 0 ? batchProductRows.map((r) => r.productId) : [batch.productId];
+        const maxOutputs = Math.max(3, allowedProductIds.length * 3);
+        if (payload.outputs.length > maxOutputs) {
+          throw new ApiError(400, `Escolha de 1 a ${maxOutputs} embalagens de saída.`);
         }
+
+        const options = await lockStockOptions(tx, ids);
+        if (options.some((o) => !allowedProductIds.includes(o.productId) || !o.active)) {
+          throw new ApiError(400, "Há uma embalagem que não está vinculada aos produtos desta batelada. Atualize a página.");
+        }
+        const formatByProduct = new Map(batchProductRows.map((r) => [r.productId, r.format]));
         const lines = payload.outputs.map((o) => {
           const option = options.find((x) => x.id === o.packagingOptionId)!;
           return { option, boxes: o.boxes };
@@ -327,7 +425,14 @@ export async function transitionBatch(user: SessionUser, id: number, raw: unknow
           .where(eq(batches.id, id));
         // Produção e entrada no estoque confirmadas na MESMA transação.
         for (const line of lines) await receiveProduction(tx, line.option.id, user);
-        const summary = lines.map((l) => `${l.boxes} × ${l.option.label} c/ ${l.option.unitsPerBox}`).join(" + ");
+        const multi = allowedProductIds.length > 1;
+        const summary = lines
+          .map((l) => {
+            const pFormat = formatByProduct.get(l.option.productId);
+            const prefix = multi && pFormat ? `${pFormat} · ` : "";
+            return `${l.boxes} × ${prefix}${l.option.label} c/ ${l.option.unitsPerBox}`;
+          })
+          .join(" + ");
         await logEvent(tx, id, "finalizado", `Acabamento concluído: ${summary}. Enviado ao estoque.`, user);
         break;
       }
