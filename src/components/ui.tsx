@@ -71,14 +71,19 @@ export function ProductTag({ brand, format, size = "sm" }: { brand: string; form
   return (
     <span
       className={cn(
-        "inline-flex shrink-0 items-stretch overflow-hidden rounded border border-ink font-bold leading-none",
+        "inline-flex max-w-full min-w-0 items-stretch overflow-hidden rounded border border-ink font-bold leading-tight",
         size === "md" ? "text-[13px]" : "text-[11px]",
       )}
     >
-      <span className={cn("px-1.5 py-1 uppercase tracking-wide", house ? "bg-ink text-hivis" : "border-r border-ink bg-white text-ink")}>
+      <span
+        className={cn(
+          "flex shrink-0 items-center px-1.5 py-1 uppercase tracking-wide",
+          house ? "bg-ink text-hivis" : "border-r border-ink bg-white text-ink",
+        )}
+      >
         {brand}
       </span>
-      <span className="tnum bg-card px-1.5 py-1 text-ink">{format}</span>
+      <span className="tnum min-w-0 break-words bg-card px-1.5 py-1 text-ink">{format}</span>
     </span>
   );
 }

@@ -1,5 +1,7 @@
 import { count, eq, sql } from "drizzle-orm";
-import { db, pool } from "@/db";
+import { appState, chatChannels } from "@/db/schema";
+import { tagLegacyDemo } from "@/lib/demo-service";
+import { db, hasDatabaseUrl } from "@/db";
 import {
   batches,
   batchEvents,
@@ -10,7 +12,6 @@ import {
   productDimensionValues,
   productDimensions,
   products,
-  sessions,
   shipments,
   users,
 } from "@/db/schema";
@@ -21,23 +22,21 @@ import type { ColumnFeature, Role, Status } from "@/lib/domain";
 
 /**
  * Inicialização do banco (idempotente, roda uma vez por processo):
- *  - garante a conta do gestor (administrador) em ADMIN_EMAIL / ADMIN_PASSWORD;
+ *  - cria apenas o primeiro gestor com ADMIN_EMAIL / ADMIN_PASSWORD;
  *  - instala o trigger que torna o carimbo de liberação imutável;
  *  - cadastra o catálogo inicial (marcas, formatos e embalagens);
- *  - em modo demonstração (padrão), cria um usuário por perfil e algumas
- *    bateladas de exemplo.
+ *  - só gera bateladas de exemplo se DEMO_MODE=on for informado explicitamente.
+ *    Após limpar a demonstração, os exemplos não são recriados.
  */
 
-export const DEMO_MODE = process.env.DEMO_MODE !== "off";
-export const DEMO_PASSWORD = "tem12345";
+export const DEMO_MODE = ["on", "true", "1"].includes((process.env.DEMO_MODE ?? "off").toLowerCase());
 
 /**
- * Conta do gestor. Os valores padrão abaixo são os do ambiente de
- * demonstração — em produção defina ADMIN_EMAIL e ADMIN_PASSWORD no provedor
- * (e troque a senha em Admin › Usuários, ou apague e recrie a conta).
+ * Credenciais de bootstrap. ADMIN_PASSWORD é obrigatória apenas em banco sem usuários.
+ * Depois do primeiro cadastro, o banco é a autoridade para e-mail, senha e perfil.
  */
 export const GESTOR_EMAIL = (process.env.ADMIN_EMAIL?.trim() || "vinicius@tem.com.br").toLowerCase();
-export const GESTOR_PASSWORD = process.env.ADMIN_PASSWORD || "#Vini2183";
+export const GESTOR_PASSWORD = process.env.ADMIN_PASSWORD ?? "";
 export const GESTOR_NAME = process.env.ADMIN_NAME?.trim() || "Vinicius";
 
 /** Pessoas de demonstração (cada uma vê o sistema por um perfil diferente). */
@@ -96,14 +95,18 @@ export function ensureReady(): Promise<ReadyState> {
 }
 
 async function init(): Promise<ReadyState> {
+  if (!hasDatabaseUrl) return { ok: false, reason: "db" };
   try {
-    await seed();
-    await pool.query(GUARD_SQL).catch((e: Error) => {
+    if (!(await seed())) return { ok: false, reason: "admin_env" };
+    await tagLegacyDemo();
+    await db.insert(chatChannels).values(["Geral", "Produção", "Qualidade", "Logística"].map((name) => ({ name }))).onConflictDoNothing();
+    await db.execute(sql.raw(GUARD_SQL)).catch((e: Error) => {
       console.warn("[init] trigger de imutabilidade não instalado:", e.message);
     });
     return { ok: true };
   } catch (e) {
-    if (pgCode(e) === "42P01") return { ok: false, reason: "schema" };
+    const code = pgCode(e);
+    if (code === "42P01" || code === "42703") return { ok: false, reason: "schema" };
     console.error("[init]", e);
     return { ok: false, reason: "db" };
   }
@@ -193,25 +196,12 @@ async function seedDimensions(tx: Tx): Promise<void> {
   }
 }
 
-/**
- * Garante que a conta do gestor exista e seja administradora ativa.
- * Nunca sobrescreve a senha de quem já entrou e trocou a própria senha.
- */
+/** O administrador inicial só é criado uma vez. Nunca recria contas excluídas nem desfaz alterações de e-mail/perfil. */
 async function ensureGestor(tx: Tx): Promise<boolean> {
-  const [existing] = await tx.select().from(users).where(eq(users.email, GESTOR_EMAIL)).limit(1);
-  if (existing) {
-    if (existing.role !== "admin" || !existing.active) {
-      await tx.update(users).set({ role: "admin", active: true }).where(eq(users.id, existing.id));
-      await tx.delete(sessions).where(eq(sessions.userId, existing.id));
-    }
-    return true;
-  }
-  await tx.insert(users).values({
-    name: GESTOR_NAME,
-    email: GESTOR_EMAIL,
-    role: "admin",
-    passwordHash: hashPassword(GESTOR_PASSWORD),
-  });
+  const [{ n }] = await tx.select({ n: count() }).from(users);
+  if (n > 0) return true;
+  if (!GESTOR_EMAIL || GESTOR_PASSWORD.length < 8) return false;
+  await tx.insert(users).values({ name: GESTOR_NAME, email: GESTOR_EMAIL, role: "admin", passwordHash: hashPassword(GESTOR_PASSWORD) });
   return true;
 }
 
@@ -220,8 +210,9 @@ async function seed(): Promise<boolean> {
     // Evita seed duplicado quando duas instâncias sobem ao mesmo tempo.
     await tx.execute(sql`select pg_advisory_xact_lock(7405101)`);
 
-    /* Gestor — criado se faltar, mesmo em banco já em uso. */
-    await ensureGestor(tx);
+    if (!(await ensureGestor(tx))) return false;
+    await tx.insert(appState).values({ id: "lifecycle" }).onConflictDoNothing();
+    const [lifecycle] = await tx.select().from(appState).where(eq(appState.id, "lifecycle"));
 
     /* Catálogo — só o gestor tem conta; os demais nomes abaixo são históricos. */
     /* Catálogo */
@@ -239,7 +230,7 @@ async function seed(): Promise<boolean> {
     /* Colunas do quadro e classificações dinâmicas. */
     await seedColumns(tx);
     await seedDimensions(tx);
-    if (!DEMO_MODE || productCount > 0) return true;
+    if (!DEMO_MODE || productCount > 0 || lifecycle.demoCleanedAt) return true;
 
     /* Bateladas de exemplo (somente demonstração) */
     const productRows = await tx.select().from(products);
@@ -349,6 +340,7 @@ async function seed(): Promise<boolean> {
         .insert(batches)
         .values({
           ...fields,
+          isDemo: true,
           productId: p.id,
           number,
           createdByName: by("producao"),
@@ -394,6 +386,7 @@ async function seed(): Promise<boolean> {
       packagingOptionId: option(tem450.id, 12).id,
       boxes: 30,
       orderRef: "PED-1042",
+      isDemo: true,
       createdByName: by("logistica"),
       createdAt: ago(20),
     });

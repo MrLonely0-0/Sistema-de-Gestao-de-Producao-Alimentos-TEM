@@ -5,7 +5,7 @@ type Ctx = { params: Promise<{ id: string }> };
 
 export const PATCH = handle<Ctx>(async (req, { params }) => {
   const user = await requireUser(req);
-  await updateShipment(user, { id: parseId((await params).id), ...((await readJson(req)) as object) });
+  await updateShipment(user, { ...((await readJson(req)) as object), id: parseId((await params).id) });
   return { ok: true };
 });
 

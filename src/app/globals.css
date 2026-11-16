@@ -135,3 +135,124 @@
     transform: rotate(-2deg);
   }
 }
+
+/* Tela de carregamento: preto puro; a arte não recebe filtro, crop ou máscara. */
+@layer components {
+  .cosmic-splash {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    width: 100%;
+    height: 100dvh;
+    overflow: hidden;
+    background: #000;
+    color: #fff;
+    opacity: 1;
+    transition: opacity 360ms ease-out;
+    overscroll-behavior: contain;
+  }
+
+  .cosmic-splash[data-phase="leaving"] {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  /* Uma imagem ausente, corrompida ou ainda não decodificada jamais cobre a tela. */
+  .cosmic-splash[data-phase="hidden"] {
+    visibility: hidden;
+    opacity: 0;
+    pointer-events: none;
+    transition: none;
+  }
+
+  .cosmic-splash[data-phase="hidden"] .cosmic-splash__pulse,
+  .cosmic-splash[data-phase="hidden"] .cosmic-splash__image {
+    animation-play-state: paused;
+  }
+
+  .page-loading-line {
+    position: fixed;
+    inset: 0 0 auto;
+    z-index: 10000;
+    height: 3px;
+    overflow: hidden;
+    pointer-events: none;
+    background: transparent;
+  }
+
+  .page-loading-line > span {
+    display: block;
+    height: 100%;
+    width: 32%;
+    background: var(--color-hivis);
+    animation: page-loading-slide 1.4s ease-in-out infinite;
+  }
+
+  @keyframes page-loading-slide {
+    from { transform: translateX(-110%); }
+    to { transform: translateX(420%); }
+  }
+
+  .cosmic-splash__center {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+  }
+
+  .cosmic-splash__pulse {
+    animation: cosmic-breathe 2.8s ease-in-out infinite;
+    transform-origin: center;
+    will-change: transform, opacity;
+  }
+
+  .cosmic-splash__image {
+    display: block;
+    width: clamp(160px, 25vw, 256px);
+    height: auto;
+    max-height: 60dvh;
+    object-fit: contain;
+    animation: cosmic-arrive 550ms ease-out both;
+  }
+
+  .cosmic-splash__slow {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: max(24px, env(safe-area-inset-bottom));
+    padding: 0 24px;
+    text-align: center;
+    font-size: 13px;
+    color: rgb(255 255 255 / 0.7);
+  }
+
+  .cosmic-splash__slow button {
+    margin: 12px 4px 0;
+    padding: 10px 16px;
+    border: 1px solid rgb(255 255 255 / 0.4);
+    border-radius: 8px;
+    color: white;
+    background: transparent;
+  }
+
+  @keyframes cosmic-arrive {
+    from { opacity: 0; transform: scale(0.97); }
+    to { opacity: 1; transform: scale(1); }
+  }
+
+  @keyframes cosmic-breathe {
+    0%, 100% { opacity: 0.84; transform: scale(0.985); }
+    50% { opacity: 1; transform: scale(1.025); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .cosmic-splash__image, .cosmic-splash__pulse {
+      animation: none !important;
+      transform: none;
+      opacity: 1;
+      will-change: auto;
+    }
+    .cosmic-splash { transition-duration: 100ms !important; }
+    .page-loading-line > span { animation: none !important; width: 100%; opacity: 0.55; }
+  }
+}

@@ -1,6 +1,10 @@
+/* eslint-disable react/jsx-key -- as células são renderizadas com key pelo componente Table */
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { SplashLink, usePageLoading } from "@/components/splash-provider";
+import { useAuth } from "@/components/auth-provider";
+
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { BarChart3, Download, FileDown, Filter, RefreshCw } from "lucide-react";
 import {
   REPORT_DATASETS,
@@ -9,7 +13,7 @@ import {
   type ReportDataset,
   type Status,
 } from "@/lib/domain";
-import { api, errMsg, fmtDateTime, fmtInt, getToken } from "@/lib/client";
+import { api, errMsg, fmtDateTime, fmtDateTimeSec, fmtInt, getToken } from "@/lib/client";
 import { Button, cn, ErrorNote, Field, inputCls, SectionTitle, STAGE_STYLE, StatusPill } from "@/components/ui";
 
 const PERIODS = [
@@ -75,8 +79,11 @@ function Table({ headers, rows, empty }: { headers: string[]; rows: Array<Array<
 }
 
 export function ReportsPanel() {
+  const user = useAuth();
+  const requestId = useRef(0);
   const [data, setData] = useState<ReportsDTO | null>(null);
   const [error, setError] = useState<string | null>(null);
+  usePageLoading(data === null && error === null);
   const [loading, setLoading] = useState(true);
   const [period, setPeriod] = useState<string>("30");
   const range = useMemo(() => defaultRange(period), [period]);
@@ -104,20 +111,33 @@ export function ReportsPanel() {
     return p.toString();
   }, [from, to, brand, productId, status, includeDeleted]);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (quiet: boolean, alive: () => boolean) => {
+    const request = ++requestId.current;
+    if (!quiet) setLoading(true);
     try {
-      setData(await api<ReportsDTO>(`/api/reports?${query}`));
-      setError(null);
-    } catch (e) {
-      setError(errMsg(e));
-    } finally {
-      setLoading(false);
-    }
+      const result = await api<ReportsDTO>(`/api/reports?${query}`);
+      if (!alive() || request !== requestId.current) return;
+      setData(result); setError(null);
+    } catch (e) { if (alive() && request === requestId.current) setError(errMsg(e)); }
+    finally { if (alive() && request === requestId.current) setLoading(false); }
   }, [query]);
 
   useEffect(() => {
-    void load();
+    let live = true;
+    const alive = () => live;
+    void load(false, alive);
+    const update = () => { if (document.visibilityState === "visible") void load(true, alive); };
+    const timer = window.setInterval(update, 8000);
+    window.addEventListener("focus", update);
+    document.addEventListener("visibilitychange", update);
+    window.addEventListener("tem:data-changed", update);
+    return () => {
+      live = false;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", update);
+      document.removeEventListener("visibilitychange", update);
+      window.removeEventListener("tem:data-changed", update);
+    };
   }, [load, reloadKey]);
 
   const pct = (n: number | null) => (n === null ? "—" : `${n.toFixed(1).replace(".", ",")}%`);
@@ -146,6 +166,12 @@ export function ReportsPanel() {
             Atualizar
           </Button>
         </div>
+
+        <p className="text-xs text-ink-3">Ligado às bateladas e ao estoque · atualiza automaticamente a cada 8 segundos. Excluídos só aparecem ao ativar a opção de auditoria.</p>
+        {!!data?.demoBatches && <div className="flex flex-wrap items-center gap-2 rounded-lg border border-prod/25 bg-prod-soft px-3 py-3 text-sm text-prod">
+          <span className="flex-1"><strong>{data.demoBatches} batelada(s) de demonstração</strong> ainda estão neste banco. Limpe os exemplos antes de publicar uma cópia dele.</span>
+          {user.role === "admin" && <SplashLink href="/admin?section=dados" className="rounded-lg border border-prod/30 px-3 py-2 text-xs font-bold transition hover:bg-white/50">Gerenciar dados</SplashLink>}
+        </div>}
 
         {/* Filtros */}
         <section className="rounded-xl border border-line bg-card p-4">
@@ -200,7 +226,7 @@ export function ReportsPanel() {
             </Field>
             <label className="flex h-11 items-center gap-2.5 self-end rounded-lg border border-ink/25 bg-white px-3 text-sm font-medium text-ink-2 sm:col-span-2 lg:col-span-1">
               <input type="checkbox" className="size-4 accent-ink" checked={includeDeleted} onChange={(e) => setIncludeDeleted(e.target.checked)} />
-              Incluir excluídos
+              Incluir excluídos (auditoria)
             </label>
           </div>
         </section>
@@ -344,17 +370,18 @@ export function ReportsPanel() {
 
             <div className="grid gap-6 xl:grid-cols-2">
               <section>
-                <SectionTitle>Saldo por embalagem</SectionTitle>
+                <SectionTitle aside={<span className="text-xs text-ink-3">Saldo atual · independente do período</span>}>Saldo por embalagem</SectionTitle>
                 <Table
-                  headers={["Produto", "Embalagem", "Produzidas", "Expedidas", "Saldo"]}
+                  headers={["Produto", "Embalagem", "Produzidas", "Ajustes", "Expedidas", "Saldo"]}
                   rows={data.stock.map((s) => [
                     `${s.brand} ${s.format}`,
                     `${s.label} c/ ${s.unitsPerBox}`,
                     fmtInt(s.produced),
+                    fmtInt(s.adjusted),
                     fmtInt(s.shipped),
                     <span className="font-bold">{fmtInt(s.balance)}</span>,
                   ])}
-                  empty="Sem caixas produzidas no período."
+                  empty="Nenhum item de estoque para estes filtros."
                 />
               </section>
               <section>
@@ -398,7 +425,7 @@ export function ReportsPanel() {
 
             <p className="flex items-center gap-1.5 text-xs text-ink-3">
               <Filter aria-hidden className="size-3.5" />
-              Dados gerados em {fmtDateTime(data.generatedAt)} · {data.filters.includeDeleted ? "incluindo registros excluídos" : "registros excluídos omitidos"}
+              Dados gerados em {fmtDateTimeSec(data.generatedAt)} · {data.filters.includeDeleted ? "incluindo registros excluídos" : "registros excluídos omitidos"}
             </p>
           </>
         )}

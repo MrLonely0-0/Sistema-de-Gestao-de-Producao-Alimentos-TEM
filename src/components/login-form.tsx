@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
+import { usePageLoading } from "@/components/splash-provider";
 import { api, adoptTokenFromUrl, getToken, errMsg, setToken } from "@/lib/client";
 import { Button, ErrorNote, Field, inputCls } from "@/components/ui";
 
@@ -8,21 +9,28 @@ export function LoginForm({ expired = false }: { expired?: boolean }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
+  const [checkingSession, setCheckingSession] = useState(true);
+  usePageLoading(busy || checkingSession);
   const [error, setError] = useState<string | null>(null);
 
-  // Já autenticado neste navegador? Vai direto para o painel.
+  // Já autenticado neste navegador? A leitura é assíncrona e cancelável.
   useEffect(() => {
-    adoptTokenFromUrl();
-    if (!getToken()) return;
     let alive = true;
-    api<{ user: unknown | null }>("/api/auth/me", { redirectOn401: false })
-      .then((res) => {
-        if (alive && res.user) window.location.replace("/");
-      })
-      .catch(() => setToken(null));
-    return () => {
-      alive = false;
-    };
+    void Promise.resolve().then(async () => {
+      if (!alive) return;
+      adoptTokenFromUrl();
+      if (!getToken()) { setCheckingSession(false); return; }
+      try {
+        const res = await api<{ user: unknown | null }>("/api/auth/me", { redirectOn401: false });
+        if (!alive) return;
+        if (res.user) window.location.replace("/");
+        else { setToken(null); setCheckingSession(false); }
+      } catch {
+        setToken(null);
+        if (alive) setCheckingSession(false);
+      }
+    });
+    return () => { alive = false; };
   }, []);
 
   async function onSubmit(e: FormEvent) {

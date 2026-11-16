@@ -1,16 +1,20 @@
-import { and, eq, inArray, sql, sum } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "@/db";
 import {
+  appState,
   attachments,
   batches,
   batchEvents,
   batchOutputs,
-  packagingOptions,
+  batchProducts,
+  productClassifications,
+  productDimensions,
   products,
   shipments,
 } from "@/db/schema";
 import { ApiError } from "@/lib/api";
+import { ensureInventoryItems, lockStockOptions, receiveProduction, requireLiveStock, stockBalance, touchStock } from "@/lib/inventory-ledger";
 import { assertFeature } from "@/lib/columns";
 import { createBatchFolder } from "@/lib/drive";
 import {
@@ -18,6 +22,7 @@ import {
   type ColumnFeature,
   can,
   canAttach,
+  FAMILY_SLUG,
   missingForReady,
   STATUS_LABEL,
   timeOrderErrors,
@@ -25,7 +30,6 @@ import {
   type Action,
   type ProductionData,
   type SessionUser,
-  canUser,
 } from "@/lib/domain";
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -69,16 +73,21 @@ const productionSchema = z.object({
   markReady: z.boolean().optional(),
 });
 
-const createSchema = productionSchema.extend({
-  productId: z.number().int().positive(),
-});
+const createSchema = productionSchema
+  .extend({
+    productId: z.number().int().positive().optional(),
+    productIds: z
+      .array(z.number().int().positive())
+      .min(1, "Escolha ao menos uma gramatura.")
+      .max(20, "Selecione no máximo 20 gramaturas por batelada.")
+      .optional(),
+  })
+  .refine((d) => d.productId !== undefined || (d.productIds && d.productIds.length > 0), {
+    message: "Escolha o produto e a gramatura.",
+  });
 
 const reason = (label: string) =>
-  z
-    .string()
-    .trim()
-    .min(3, `Informe o motivo da ${label}.`)
-    .max(500, "Use no máximo 500 caracteres.");
+  z.string().trim().min(3, `Informe o motivo da ${label}.`).max(500, "Use no máximo 500 caracteres.");
 
 const transitionSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("marcar_pronto") }),
@@ -91,25 +100,17 @@ const transitionSchema = z.discriminatedUnion("action", [
       .array(
         z.object({
           packagingOptionId: z.number().int().positive(),
-          boxes: z
-            .number()
-            .int("Use números inteiros de caixas.")
-            .min(1, "Informe ao menos 1 caixa.")
-            .max(1_000_000),
+          boxes: z.number().int("Use números inteiros de caixas.").min(1, "Informe ao menos 1 caixa.").max(1_000_000),
         }),
       )
-      .min(1, "Escolha de 1 a 3 embalagens de saída.")
-      .max(3, "Escolha de 1 a 3 embalagens de saída."),
+      .min(1, "Escolha ao menos 1 embalagem de saída.")
+      .max(20, "Escolha no máximo 20 embalagens de saída."),
   }),
 ]);
 
 const attachmentSchema = z.object({
   kind: z.enum(ATTACHMENT_KINDS),
-  name: z
-    .string()
-    .trim()
-    .min(2, "Dê um nome ao anexo.")
-    .max(120, "Use no máximo 120 caracteres."),
+  name: z.string().trim().min(2, "Dê um nome ao anexo.").max(120, "Use no máximo 120 caracteres."),
   url: z
     .string()
     .trim()
@@ -125,24 +126,15 @@ const attachmentSchema = z.object({
 
 const shipmentSchema = z.object({
   packagingOptionId: z.number().int().positive(),
-  boxes: z
-    .number()
-    .int("Use números inteiros de caixas.")
-    .min(1, "Informe ao menos 1 caixa.")
-    .max(1_000_000),
-  orderRef: z
-    .string()
-    .trim()
-    .min(1, "Informe o número do pedido.")
-    .max(40, "Use no máximo 40 caracteres."),
+  boxes: z.number().int("Use números inteiros de caixas.").min(1, "Informe ao menos 1 caixa.").max(1_000_000),
+  orderRef: z.string().trim().min(1, "Informe o número do pedido.").max(40, "Use no máximo 40 caracteres."),
   customer: optionalText(80),
 });
 
 /* ───────────── Auxiliares ───────────── */
 
 function assertCan(user: SessionUser, action: Action) {
-  if (!canUser(user, action))
-    throw new ApiError(403, "Seu perfil não tem permissão para esta ação.");
+  if (!can(user.role, action, user.permissions)) throw new ApiError(403, "Seu perfil não tem permissão para esta ação.");
 }
 
 function assertConsistent(data: ProductionData) {
@@ -153,20 +145,11 @@ function assertConsistent(data: ProductionData) {
 function assertReady(data: ProductionData) {
   const missing = missingForReady(data);
   if (missing.length > 0) {
-    throw new ApiError(
-      422,
-      `Para marcar como Pronto, complete: ${missing.join(", ")}.`,
-    );
+    throw new ApiError(422, `Para marcar como Pronto, complete: ${missing.join(", ")}.`);
   }
 }
 
-async function logEvent(
-  tx: Tx,
-  batchId: number,
-  type: string,
-  message: string,
-  user: SessionUser,
-) {
+async function logEvent(tx: Tx, batchId: number, type: string, message: string, user: SessionUser) {
   await tx.insert(batchEvents).values({
     batchId,
     type,
@@ -188,44 +171,93 @@ function audit(user: SessionUser, now = new Date()) {
   };
 }
 
+/** Converte "160 g", "1 kg"… em número para manter a ordem das gramaturas consistente. */
+function weightOf(format: string): number {
+  const m = format.replace(",", ".").match(/([\d.]+)\s*(kg|g|ml|l)\b/i);
+  if (!m) return Number.MAX_SAFE_INTEGER;
+  const value = parseFloat(m[1]);
+  return /^(kg|l)$/i.test(m[2]) ? value * 1000 : value;
+}
+
 /* ───────────── Etapa 1 · Produção ───────────── */
 
-export async function createBatch(
-  user: SessionUser,
-  raw: unknown,
-): Promise<{ id: number; number: number }> {
+export async function createBatch(user: SessionUser, raw: unknown): Promise<{ id: number; number: number }> {
   assertCan(user, "criar");
   await assertFeature("criar", "em_preparo");
-  const { productId, markReady, ...data } = createSchema.parse(raw);
+  const { productId, productIds: rawIds, markReady, ...data } = createSchema.parse(raw);
+  const requestedIds = [...new Set(rawIds ?? (productId !== undefined ? [productId] : []))];
   assertConsistent(data);
-  if (markReady) assertReady(data);
+  if (markReady) {
+    await assertFeature("marcar_pronto", "em_preparo");
+    assertReady(data);
+  }
 
   return db.transaction(async (tx) => {
-    // Incremento atômico: o UPDATE trava a linha do produto, então duas
+    if (requestedIds.length > 1) {
+      const [state] = await tx
+        .select({ allow: appState.allowMultiFormatBatch })
+        .from(appState)
+        .where(eq(appState.id, "lifecycle"));
+      if (state && !state.allow) {
+        throw new ApiError(400, "A seleção de várias gramaturas na mesma batelada está desabilitada pelo administrador.");
+      }
+    }
+
+    const selected = await tx
+      .select()
+      .from(products)
+      .where(and(inArray(products.id, requestedIds), eq(products.active, true), isNull(products.deletedAt)));
+    if (selected.length !== requestedIds.length) {
+      throw new ApiError(404, "Produto não encontrado ou inativo.");
+    }
+    const brands = new Set(selected.map((p) => p.brand));
+    if (brands.size > 1) {
+      throw new ApiError(400, "Selecione gramaturas da mesma marca na mesma batelada.");
+    }
+
+    if (selected.length > 1) {
+      const dims = await tx.select().from(productDimensions);
+      const familyDim =
+        dims.find((d) => d.slug === FAMILY_SLUG) ??
+        dims.find((d) => d.name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase() === FAMILY_SLUG);
+      if (familyDim?.active) {
+        const classRows = await tx
+          .select()
+          .from(productClassifications)
+          .where(and(inArray(productClassifications.productId, requestedIds), eq(productClassifications.dimensionId, familyDim.id)));
+        const byProduct = new Map(classRows.map((c) => [c.productId, c.valueId]));
+        const familySet = new Set(requestedIds.map((pid) => byProduct.get(pid) ?? null));
+        if (familySet.size > 1) {
+          throw new ApiError(400, "Selecione gramaturas da mesma família na mesma batelada.");
+        }
+      }
+    }
+
+    const ordered = [...selected].sort((a, b) => weightOf(a.format) - weightOf(b.format) || a.id - b.id);
+    const primaryTarget = ordered[0];
+    const combinedFormat = ordered.map((p) => p.format).join(" + ");
+
+    // Incremento atômico: o UPDATE trava a linha do produto principal, então duas
     // bateladas simultâneas do mesmo item nunca recebem o mesmo número.
     const [product] = await tx
       .update(products)
       .set({ batchCounter: sql`${products.batchCounter} + 1` })
-      .where(and(eq(products.id, productId), eq(products.active, true)))
+      .where(and(eq(products.id, primaryTarget.id), eq(products.active, true), isNull(products.deletedAt)))
       .returning();
     if (!product) throw new ApiError(404, "Produto não encontrado ou inativo.");
 
     const number = product.batchCounter;
-    const folder = await createBatchFolder({
-      brand: product.brand,
-      format: product.format,
-      number,
-    });
+    const folder = await createBatchFolder({ brand: product.brand, format: combinedFormat, number });
     const now = new Date();
 
     const [batch] = await tx
       .insert(batches)
       .values({
         ...data,
-        productId,
+        productId: product.id,
         number,
         brand: product.brand,
-        format: product.format,
+        format: combinedFormat,
         status: markReady ? "pronto" : "em_preparo",
         readyAt: markReady ? now : null,
         createdById: user.id,
@@ -236,55 +268,38 @@ export async function createBatch(
       })
       .returning({ id: batches.id });
 
-    await logEvent(
-      tx,
-      batch.id,
-      "criada",
-      `Batelada #${number} aberta em "Em preparo".`,
-      user,
+    await tx.insert(batchProducts).values(
+      ordered.map((p) => ({
+        batchId: batch.id,
+        productId: p.id,
+        brand: p.brand,
+        format: p.format,
+      })),
     );
-    await logEvent(
-      tx,
-      batch.id,
-      "drive",
-      `Pasta criada no Drive (simulado): ${folder.path}`,
-      user,
-    );
-    if (markReady)
-      await logEvent(
-        tx,
-        batch.id,
-        "pronto",
-        "Marcada como Pronto e enviada à Qualidade.",
-        user,
-      );
+
+    const suffix = ordered.length > 1 ? ` (${combinedFormat})` : "";
+    await logEvent(tx, batch.id, "criada", `Batelada #${number} aberta em "Em preparo"${suffix}.`, user);
+    await logEvent(tx, batch.id, "drive", `Pasta criada no Drive (simulado): ${folder.path}`, user);
+    if (markReady) await logEvent(tx, batch.id, "pronto", "Marcada como Pronto e enviada à Qualidade.", user);
     return { id: batch.id, number };
   });
 }
 
-export async function updateBatch(
-  user: SessionUser,
-  id: number,
-  raw: unknown,
-): Promise<void> {
+export async function updateBatch(user: SessionUser, id: number, raw: unknown): Promise<void> {
   assertCan(user, "editar");
   await assertFeature("editar", "em_preparo");
   const { markReady, ...data } = productionSchema.parse(raw);
   assertConsistent(data);
-  if (markReady) assertReady(data);
+  if (markReady) {
+    await assertFeature("marcar_pronto", "em_preparo");
+    assertReady(data);
+  }
 
   await db.transaction(async (tx) => {
-    const [batch] = await tx
-      .select()
-      .from(batches)
-      .where(eq(batches.id, id))
-      .for("update");
-    if (!batch) throw new ApiError(404, "Batelada não encontrada.");
+    const [batch] = await tx.select().from(batches).where(eq(batches.id, id)).for("update");
+    if (!batch || batch.deletedAt) throw new ApiError(404, "Batelada não encontrada.");
     if (batch.status !== "em_preparo") {
-      throw new ApiError(
-        409,
-        `Esta batelada já está "${STATUS_LABEL[batch.status]}" e não pode mais ser editada.`,
-      );
+      throw new ApiError(409, `Esta batelada já está "${STATUS_LABEL[batch.status]}" e não pode mais ser editada.`);
     }
     const now = new Date();
     await tx
@@ -292,54 +307,32 @@ export async function updateBatch(
       .set({
         ...data,
         ...audit(user, now),
-        ...(markReady
-          ? {
-              status: "pronto" as const,
-              readyAt: now,
-              qualityNote: null,
-              heldAt: null,
-            }
-          : {}),
+        ...(markReady ? { status: "pronto" as const, readyAt: now, qualityNote: null, heldAt: null } : {}),
       })
       .where(eq(batches.id, id));
     await logEvent(tx, id, "editada", "Dados de produção atualizados.", user);
-    if (markReady)
-      await logEvent(
-        tx,
-        id,
-        "pronto",
-        "Marcada como Pronto e enviada à Qualidade.",
-        user,
-      );
+    if (markReady) await logEvent(tx, id, "pronto", "Marcada como Pronto e enviada à Qualidade.", user);
   });
 }
 
 /* ───────────── Etapas 1→4 · Movimentação do card ───────────── */
 
-export async function transitionBatch(
-  user: SessionUser,
-  id: number,
-  raw: unknown,
-): Promise<void> {
+export async function transitionBatch(user: SessionUser, id: number, raw: unknown): Promise<void> {
   const payload = transitionSchema.parse(raw);
   assertCan(user, payload.action);
 
   await db.transaction(async (tx) => {
     // FOR UPDATE: se duas pessoas agirem no mesmo card, a segunda espera e
     // então enxerga o status já alterado.
-    const [batch] = await tx
-      .select()
-      .from(batches)
-      .where(eq(batches.id, id))
-      .for("update");
-    if (!batch) throw new ApiError(404, "Batelada não encontrada.");
-    await assertFeature(payload.action as ColumnFeature, batch.status);
+    const [batch] = await tx.select().from(batches).where(eq(batches.id, id)).for("update");
+    if (!batch || batch.deletedAt) throw new ApiError(404, "Batelada não encontrada.");
     if (!TRANSITIONS[payload.action].from.includes(batch.status)) {
       throw new ApiError(
         409,
-        `Esta batelada está "${STATUS_LABEL[batch.status]}" e não permite essa ação. O painel foi atualizado por outra pessoa.`,
+        `Esta batelada está "${STATUS_LABEL[batch.status]}" e não permite essa ação. Atualize o painel.`,
       );
     }
+    await assertFeature(payload.action as ColumnFeature, batch.status);
     const now = new Date();
 
     switch (payload.action) {
@@ -347,21 +340,9 @@ export async function transitionBatch(
         assertReady(batch);
         await tx
           .update(batches)
-          .set({
-            status: "pronto",
-            readyAt: now,
-            qualityNote: null,
-            heldAt: null,
-            updatedAt: now,
-          })
+          .set({ status: "pronto", readyAt: now, qualityNote: null, heldAt: null, updatedAt: now })
           .where(eq(batches.id, id));
-        await logEvent(
-          tx,
-          id,
-          "pronto",
-          "Marcada como Pronto e enviada à Qualidade.",
-          user,
-        );
+        await logEvent(tx, id, "pronto", "Marcada como Pronto e enviada à Qualidade.", user);
         break;
       }
       case "liberar": {
@@ -377,86 +358,51 @@ export async function transitionBatch(
             ...audit(user, now),
           })
           .where(eq(batches.id, id));
-        await logEvent(
-          tx,
-          id,
-          "liberado",
-          "Lote LIBERADO pela Qualidade. Carimbo de data e hora registrado.",
-          user,
-        );
+        await logEvent(tx, id, "liberado", "Lote LIBERADO pela Qualidade. Carimbo de data e hora registrado.", user);
         break;
       }
       case "reter": {
         await tx
           .update(batches)
-          .set({
-            status: "retido",
-            qualityNote: payload.reason,
-            heldAt: now,
-            updatedAt: now,
-          })
+          .set({ status: "retido", qualityNote: payload.reason, heldAt: now, updatedAt: now })
           .where(eq(batches.id, id));
-        await logEvent(
-          tx,
-          id,
-          "retido",
-          `Lote RETIDO. Motivo: ${payload.reason}`,
-          user,
-        );
+        await logEvent(tx, id, "retido", `Lote RETIDO. Motivo: ${payload.reason}`, user);
         break;
       }
       case "devolver": {
         await tx
           .update(batches)
-          .set({
-            status: "em_preparo",
-            readyAt: null,
-            qualityNote: payload.reason,
-            heldAt: null,
-            updatedAt: now,
-          })
+          .set({ status: "em_preparo", readyAt: null, qualityNote: payload.reason, heldAt: null, updatedAt: now })
           .where(eq(batches.id, id));
-        await logEvent(
-          tx,
-          id,
-          "devolvido",
-          `Devolvida à Produção. Motivo: ${payload.reason}`,
-          user,
-        );
+        await logEvent(tx, id, "devolvido", `Devolvida à Produção. Motivo: ${payload.reason}`, user);
         break;
       }
       case "finalizar": {
         const ids = payload.outputs.map((o) => o.packagingOptionId);
         if (new Set(ids).size !== ids.length) {
-          throw new ApiError(
-            400,
-            "Cada embalagem só pode ser escolhida uma vez.",
-          );
+          throw new ApiError(400, "Cada embalagem só pode ser escolhida uma vez.");
         }
-        const options = await tx
-          .select()
-          .from(packagingOptions)
-          .where(
-            and(
-              eq(packagingOptions.productId, batch.productId),
-              inArray(packagingOptions.id, ids),
-              eq(packagingOptions.active, true),
-            ),
-          );
-        if (options.length !== ids.length) {
-          throw new ApiError(
-            400,
-            "Há uma embalagem que não está vinculada a este produto. Atualize a página.",
-          );
+        const batchProductRows = await tx
+          .select({ productId: batchProducts.productId, format: batchProducts.format })
+          .from(batchProducts)
+          .where(eq(batchProducts.batchId, id))
+          .orderBy(asc(batchProducts.id));
+        const allowedProductIds = batchProductRows.length > 0 ? batchProductRows.map((r) => r.productId) : [batch.productId];
+        const maxOutputs = Math.max(3, allowedProductIds.length * 3);
+        if (payload.outputs.length > maxOutputs) {
+          throw new ApiError(400, `Escolha de 1 a ${maxOutputs} embalagens de saída.`);
         }
+
+        const options = await lockStockOptions(tx, ids);
+        if (options.some((o) => !allowedProductIds.includes(o.productId) || !o.active)) {
+          throw new ApiError(400, "Há uma embalagem que não está vinculada aos produtos desta batelada. Atualize a página.");
+        }
+        const formatByProduct = new Map(batchProductRows.map((r) => [r.productId, r.format]));
         const lines = payload.outputs.map((o) => {
           const option = options.find((x) => x.id === o.packagingOptionId)!;
           return { option, boxes: o.boxes };
         });
-        const totalUnits = lines.reduce(
-          (acc, l) => acc + l.boxes * l.option.unitsPerBox,
-          0,
-        );
+        const totalUnits = lines.reduce((acc, l) => acc + l.boxes * l.option.unitsPerBox, 0);
         const good = batch.goodUnits ?? 0;
         if (totalUnits > good) {
           throw new ApiError(
@@ -475,25 +421,19 @@ export async function transitionBatch(
         );
         await tx
           .update(batches)
-          .set({
-            status: "em_estoque",
-            finishedAt: now,
-            finishedByName: user.name,
-            updatedAt: now,
-          })
+          .set({ status: "em_estoque", finishedAt: now, finishedByName: user.name, ...audit(user, now) })
           .where(eq(batches.id, id));
+        // Produção e entrada no estoque confirmadas na MESMA transação.
+        for (const line of lines) await receiveProduction(tx, line.option.id, user);
+        const multi = allowedProductIds.length > 1;
         const summary = lines
-          .map(
-            (l) => `${l.boxes} × ${l.option.label} c/ ${l.option.unitsPerBox}`,
-          )
+          .map((l) => {
+            const pFormat = formatByProduct.get(l.option.productId);
+            const prefix = multi && pFormat ? `${pFormat} · ` : "";
+            return `${l.boxes} × ${prefix}${l.option.label} c/ ${l.option.unitsPerBox}`;
+          })
           .join(" + ");
-        await logEvent(
-          tx,
-          id,
-          "finalizado",
-          `Acabamento concluído: ${summary}. Enviado ao estoque.`,
-          user,
-        );
+        await logEvent(tx, id, "finalizado", `Acabamento concluído: ${summary}. Enviado ao estoque.`, user);
         break;
       }
     }
@@ -502,22 +442,13 @@ export async function transitionBatch(
 
 /* ───────────── Exclusão de batelada (somente admin) ───────────── */
 
-export async function deleteBatch(
-  user: SessionUser,
-  id: number,
-): Promise<void> {
-  if (user.role !== "admin")
-    throw new ApiError(403, "Somente o administrador pode excluir bateladas.");
+export async function deleteBatch(user: SessionUser, id: number): Promise<void> {
+  if (user.role !== "admin") throw new ApiError(403, "Somente o administrador pode excluir bateladas.");
   await assertFeature("excluir");
   await db.transaction(async (tx) => {
-    const [batch] = await tx
-      .select()
-      .from(batches)
-      .where(eq(batches.id, id))
-      .for("update");
-    if (!batch) throw new ApiError(404, "Batelada não encontrada.");
-    if (batch.deletedAt)
-      throw new ApiError(409, "Esta batelada já foi excluída.");
+    const [batch] = await tx.select().from(batches).where(eq(batches.id, id)).for("update");
+    if (!batch || batch.deletedAt) throw new ApiError(404, "Batelada não encontrada.");
+    if (batch.deletedAt) throw new ApiError(409, "Esta batelada já foi excluída.");
     const now = new Date();
     await tx
       .update(batches)
@@ -542,112 +473,50 @@ export async function deleteBatch(
 
 /* ───────────── Anexos (links guardados na pasta do Drive) ───────────── */
 
-export async function addAttachment(
-  user: SessionUser,
-  batchId: number,
-  raw: unknown,
-): Promise<void> {
+export async function addAttachment(user: SessionUser, batchId: number, raw: unknown): Promise<void> {
   const data = attachmentSchema.parse(raw);
   await db.transaction(async (tx) => {
-    const [batch] = await tx
-      .select()
-      .from(batches)
-      .where(eq(batches.id, batchId))
-      .for("update");
-    if (!batch) throw new ApiError(404, "Batelada não encontrada.");
-    if (!canAttach(user.role, batch.status)) {
-      throw new ApiError(
-        403,
-        "Seu perfil não pode anexar arquivos a esta batelada nesta etapa.",
-      );
+    const [batch] = await tx.select().from(batches).where(eq(batches.id, batchId)).for("update");
+    if (!batch || batch.deletedAt) throw new ApiError(404, "Batelada não encontrada.");
+    if (!canAttach(user.role, batch.status, user.permissions)) {
+      throw new ApiError(403, "Seu perfil não pode anexar arquivos a esta batelada nesta etapa.");
     }
     await assertFeature("anexar", batch.status);
-    await tx
-      .insert(attachments)
-      .values({
-        ...data,
-        batchId,
-        createdById: user.id,
-        createdByName: user.name,
-      });
-    await tx
-      .update(batches)
-      .set({ updatedAt: new Date() })
-      .where(eq(batches.id, batchId));
-    await logEvent(
-      tx,
-      batchId,
-      "anexo",
-      `${data.kind === "laudo" ? "Laudo" : "Foto"} anexado(a): ${data.name}`,
-      user,
-    );
+    await tx.insert(attachments).values({ ...data, batchId, createdById: user.id, createdByName: user.name });
+    await tx.update(batches).set({ updatedAt: new Date() }).where(eq(batches.id, batchId));
+    await logEvent(tx, batchId, "anexo", `${data.kind === "laudo" ? "Laudo" : "Foto"} anexado(a): ${data.name}`, user);
   });
 }
 
-export async function removeAttachment(
-  user: SessionUser,
-  batchId: number,
-  attachmentId: number,
-): Promise<void> {
+export async function removeAttachment(user: SessionUser, batchId: number, attachmentId: number): Promise<void> {
   await db.transaction(async (tx) => {
     const [row] = await tx
       .select()
       .from(attachments)
-      .where(
-        and(eq(attachments.id, attachmentId), eq(attachments.batchId, batchId)),
-      );
+      .where(and(eq(attachments.id, attachmentId), eq(attachments.batchId, batchId)));
     if (!row) throw new ApiError(404, "Anexo não encontrado.");
     if (user.role !== "admin" && row.createdById !== user.id) {
-      throw new ApiError(
-        403,
-        "Só quem anexou (ou um administrador) pode remover este anexo.",
-      );
+      throw new ApiError(403, "Só quem anexou (ou um administrador) pode remover este anexo.");
     }
     await tx.delete(attachments).where(eq(attachments.id, attachmentId));
-    await tx
-      .update(batches)
-      .set({ updatedAt: new Date() })
-      .where(eq(batches.id, batchId));
+    await tx.update(batches).set({ updatedAt: new Date() }).where(eq(batches.id, batchId));
     await logEvent(tx, batchId, "anexo", `Anexo removido: ${row.name}`, user);
   });
 }
 
 /* ───────────── Etapa 4 · Separação para expedição ───────────── */
 
-export async function createShipment(
-  user: SessionUser,
-  raw: unknown,
-): Promise<void> {
+export async function createShipment(user: SessionUser, raw: unknown): Promise<void> {
   assertCan(user, "separar");
   await assertFeature("separar");
   const data = shipmentSchema.parse(raw);
-
+  await ensureInventoryItems();
   await db.transaction(async (tx) => {
-    // Trava a embalagem para que duas separações simultâneas não estourem o saldo.
-    const [option] = await tx
-      .select()
-      .from(packagingOptions)
-      .where(eq(packagingOptions.id, data.packagingOptionId))
-      .for("update");
-    if (!option) throw new ApiError(404, "Item de estoque não encontrado.");
-
-    const [[produced], [shipped]] = await Promise.all([
-      tx
-        .select({ total: sum(batchOutputs.boxes) })
-        .from(batchOutputs)
-        .where(eq(batchOutputs.packagingOptionId, option.id)),
-      tx
-        .select({ total: sum(shipments.boxes) })
-        .from(shipments)
-        .where(eq(shipments.packagingOptionId, option.id)),
-    ]);
-    const balance = Number(produced?.total ?? 0) - Number(shipped?.total ?? 0);
-    if (data.boxes > balance) {
-      throw new ApiError(
-        409,
-        `Saldo insuficiente: há ${balance} caixa(s) disponíveis deste item.`,
-      );
-    }
+    await lockStockOptions(tx, [data.packagingOptionId]);
+    await requireLiveStock(tx, data.packagingOptionId);
+    const available = await stockBalance(tx, data.packagingOptionId);
+    if (data.boxes > available) throw new ApiError(409, `Saldo insuficiente: há ${available} caixa(s) disponíveis deste item.`);
     await tx.insert(shipments).values({ ...data, createdByName: user.name });
+    await touchStock(tx, data.packagingOptionId, user);
   });
 }

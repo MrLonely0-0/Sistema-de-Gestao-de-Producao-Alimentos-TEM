@@ -13,6 +13,9 @@ function BatchHeadline({ batch }: { batch: BatchDTO }) {
     <div className="flex flex-wrap items-center gap-3 rounded-lg border border-line bg-card px-3 py-2.5">
       <span className="display tnum text-[30px]">#{batch.number}</span>
       <ProductTag brand={batch.brand} format={batch.format} size="md" />
+      {batch.familyName && (
+        <span className="rounded bg-paper-deep px-2 py-0.5 text-xs font-semibold text-ink-2">{batch.familyName}</span>
+      )}
       {batch.goodUnits !== null && (
         <span className="ml-auto text-sm text-ink-2">
           <span className="tnum font-bold text-ink">{fmtInt(batch.goodUnits)}</span> unidades boas
@@ -214,22 +217,26 @@ export function ReasonDialog({
   );
 }
 
-/* ───────────── Etapa 3 · Compositor de caixas (1 a 3 embalagens) ───────────── */
-
-const MAX_OUTPUTS = 3;
+/* ───────────── Etapa 3 · Compositor de caixas ───────────── */
 
 export function FinishDialog({
   batch,
-  product,
+  products,
   onClose,
   onDone,
 }: {
   batch: BatchDTO;
-  product: ProductDTO | undefined;
+  products: ProductDTO[];
   onClose: () => void;
   onDone: (message: string) => void;
 }) {
-  const options = (product?.packaging ?? []).filter((o) => o.active);
+  const multiProduct = products.length > 1;
+  const maxOutputs = Math.max(3, products.length * 3);
+  const options = products.flatMap((p) =>
+    p.packaging
+      .filter((o) => o.active)
+      .map((o) => ({ ...o, productFormat: p.format })),
+  );
   // Mapa embalagem → quantidade digitada. Com uma única opção, já vem marcada.
   const [qty, setQty] = useState<Record<number, string>>(() => (options.length === 1 ? { [options[0].id]: "" } : {}));
   const [busy, setBusy] = useState(false);
@@ -240,7 +247,7 @@ export function FinishDialog({
   const used = lines.reduce((acc, l) => acc + l.boxes * l.option.unitsPerBox, 0);
   const left = good - used;
   const totalBoxes = lines.reduce((acc, l) => acc + l.boxes, 0);
-  const atLimit = lines.length >= MAX_OUTPUTS;
+  const atLimit = lines.length >= maxOutputs;
   const ready = lines.length > 0 && lines.every((l) => l.boxes > 0) && left >= 0;
 
   function toggle(id: number) {
@@ -249,7 +256,7 @@ export function FinishDialog({
         const { [id]: _removed, ...rest } = cur;
         return rest;
       }
-      return Object.keys(cur).length >= MAX_OUTPUTS ? cur : { ...cur, [id]: "" };
+      return Object.keys(cur).length >= maxOutputs ? cur : { ...cur, [id]: "" };
     });
   }
 
@@ -303,12 +310,13 @@ export function FinishDialog({
         ) : (
           <>
             <div>
-              <SectionTitle aside={<span className="text-xs text-ink-3">{lines.length} de {MAX_OUTPUTS} escolhidas</span>}>
+              <SectionTitle aside={<span className="text-xs text-ink-3">{lines.length} de {maxOutputs} escolhidas</span>}>
                 1 · Embalagens de saída
               </SectionTitle>
               <div className="flex flex-wrap gap-2">
                 {options.map((o) => {
                   const on = o.id in qty;
+                  const title = multiProduct ? `${o.productFormat} · ${packLabel(o.label, o.unitsPerBox)}` : packLabel(o.label, o.unitsPerBox);
                   return (
                     <button
                       key={o.id}
@@ -327,13 +335,13 @@ export function FinishDialog({
                       >
                         {on && <Check className="size-3.5" strokeWidth={3} />}
                       </span>
-                      {packLabel(o.label, o.unitsPerBox)}
+                      {title}
                     </button>
                   );
                 })}
               </div>
-              {atLimit && options.length > MAX_OUTPUTS && (
-                <p className="mt-2 text-xs text-ink-3">Limite de {MAX_OUTPUTS} embalagens por batelada. Desmarque uma para trocar.</p>
+              {atLimit && options.length > maxOutputs && (
+                <p className="mt-2 text-xs text-ink-3">Limite de {maxOutputs} embalagens por batelada. Desmarque uma para trocar.</p>
               )}
             </div>
 
@@ -345,20 +353,24 @@ export function FinishDialog({
                 </p>
               ) : (
                 <ul className="space-y-2">
-                  {lines.map(({ option, boxes }) => (
+                  {lines.map(({ option, boxes }) => {
+                    const optionTitle = multiProduct
+                      ? `${option.productFormat} · ${packLabel(option.label, option.unitsPerBox)}`
+                      : packLabel(option.label, option.unitsPerBox);
+                    return (
                     <li
                       key={option.id}
                       className="grid grid-cols-[1fr_auto] items-center gap-x-3 gap-y-2 rounded-lg border border-line bg-card p-3 sm:grid-cols-[1fr_11rem_auto]"
                     >
                       <div className="min-w-0">
-                        <p className="text-[15px] font-bold">{packLabel(option.label, option.unitsPerBox)}</p>
+                        <p className="text-[15px] font-bold">{optionTitle}</p>
                         <p className="tnum text-xs text-ink-3">
                           {fmtInt(boxes)} cx × {option.unitsPerBox} = <span className="font-semibold text-ink-2">{fmtInt(boxes * option.unitsPerBox)} un</span>
                         </p>
                       </div>
                       <div className="max-sm:col-span-2 max-sm:row-start-2">
                         <Stepper
-                          label={`caixas de ${packLabel(option.label, option.unitsPerBox)}`}
+                          label={`caixas de ${optionTitle}`}
                           value={qty[option.id]}
                           onChange={(v) => setQty((cur) => ({ ...cur, [option.id]: v }))}
                         />
@@ -367,7 +379,8 @@ export function FinishDialog({
                         Máx.
                       </Button>
                     </li>
-                  ))}
+                    );
+                  })}
                 </ul>
               )}
             </div>

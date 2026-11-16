@@ -31,13 +31,47 @@ function SmallCard({ children, className }: { children: ReactNode; className?: s
   return <div className={cn("rounded-xl border border-line bg-card p-4", className)}>{children}</div>;
 }
 
+export function MultiFormatSettingCard({
+  allowMultiFormatBatch,
+  run,
+}: {
+  allowMultiFormatBatch: boolean;
+  run: Run;
+}) {
+  return (
+    <PanelCard className="flex flex-wrap items-center justify-between gap-4">
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-bold">Múltiplas gramaturas por batelada</p>
+        <p className="mt-0.5 text-xs leading-relaxed text-ink-3">
+          Quando ligado, o operador pode marcar várias gramaturas da mesma marca e família ao criar uma batelada
+          (ex.: Feliz 160 g + 450 g). Quando desligado, apenas 1 gramatura pode ser marcada por batelada.
+        </p>
+      </div>
+      <Switch
+        checked={allowMultiFormatBatch}
+        onChange={(next) =>
+          void run(
+            () => api("/api/admin/settings", { method: "PATCH", body: { allowMultiFormatBatch: next } }),
+            next
+              ? "Seleção de múltiplas gramaturas por batelada habilitada."
+              : "Seleção restrita a uma gramatura por batelada.",
+          )
+        }
+        label={allowMultiFormatBatch ? "Habilitado" : "Desabilitado"}
+      />
+    </PanelCard>
+  );
+}
+
 export function ProductsTab({
   products,
   dimensions,
+  allowMultiFormatBatch,
   run,
 }: {
   products: ProductDTO[];
   dimensions: DimensionDTO[];
+  allowMultiFormatBatch: boolean;
   run: Run;
 }) {
   const toast = useToast();
@@ -102,6 +136,8 @@ export function ProductsTab({
 
   return (
     <div className="space-y-6">
+      <MultiFormatSettingCard allowMultiFormatBatch={allowMultiFormatBatch} run={run} />
+
       {/* ── Tipos de separação (dimensões) ── */}
       <section>
         <SectionTitle
@@ -757,7 +793,12 @@ function ProductFormDialog({
       <form id="product-form" onSubmit={submit} className="space-y-4">
         <div className="grid gap-3 sm:grid-cols-2">
           {dimensions.map((d) => (
-            <Field key={d.id} label={d.name} optional={!d.isBrand}>
+            <Field
+              key={d.id}
+              label={d.name}
+              optional={!d.isBrand}
+              hint={d.slug === "familia" ? "Exibida como filtro obrigatório ao abrir batelada." : undefined}
+            >
               <select className={inputCls} value={selected[d.id] ?? ""} onChange={(e) => setSelected((cur) => ({ ...cur, [d.id]: e.target.value }))}>
                 <option value="">Sem classificação</option>
                 {d.values.filter((v) => v.active).map((v) => (

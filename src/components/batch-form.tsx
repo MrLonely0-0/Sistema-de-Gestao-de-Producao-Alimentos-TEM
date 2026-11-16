@@ -1,12 +1,14 @@
 "use client";
 
 import { useMemo, useState, type FormEvent } from "react";
-import { Clock } from "lucide-react";
+import { Check, Clock } from "lucide-react";
 import {
+  findFamilyDimension,
   missingForReady,
   PROCESS_STEPS,
   timeOrderErrors,
   type BatchDTO,
+  type DimensionDTO,
   type ProductDTO,
   type ProductionData,
 } from "@/lib/domain";
@@ -23,6 +25,8 @@ interface FormState extends Record<TimeKey, string> {
   notes: string;
 }
 
+type FamilyChoiceKey = number | "none";
+
 const onlyDigits = (v: string) => v.replace(/\D/g, "").slice(0, 7);
 const toInt = (v: string) => (v.trim() === "" ? null : Number(v));
 
@@ -30,18 +34,30 @@ const toInt = (v: string) => (v.trim() === "" ? null : Number(v));
 export function BatchForm({
   batch,
   products,
+  dimensions = [],
+  allowMultiFormatBatch = true,
   onClose,
   onDone,
 }: {
   batch?: BatchDTO;
   products: ProductDTO[];
+  dimensions?: DimensionDTO[];
+  allowMultiFormatBatch?: boolean;
   onClose: () => void;
   onDone: (message: string) => void;
 }) {
   const editing = !!batch;
   const brands = useMemo(() => [...new Set(products.map((p) => p.brand))], [products]);
-  const [brand, setBrand] = useState(batch?.brand ?? brands[0] ?? "");
-  const [productId, setProductId] = useState<number | null>(batch?.productId ?? null);
+  const familyDim = useMemo(() => findFamilyDimension(dimensions), [dimensions]);
+  const activeFamilyValues = useMemo(
+    () => (familyDim?.active ? familyDim.values.filter((v) => v.active) : []),
+    [familyDim],
+  );
+  const requireFamily = !!familyDim?.active && activeFamilyValues.length > 0;
+
+  const [brand, setBrand] = useState(batch?.brand ?? "");
+  const [familyKey, setFamilyKey] = useState<FamilyChoiceKey | null>(null);
+  const [selectedIds, setSelectedIds] = useState<number[]>(() => (batch ? batch.productIds : []));
   const [f, setF] = useState<FormState>(() => ({
     garlicLot: batch?.garlicLot ?? "",
     preservativeLot: batch?.preservativeLot ?? "",
@@ -59,8 +75,67 @@ export function BatchForm({
   const [error, setError] = useState<string | null>(null);
 
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) => setF((cur) => ({ ...cur, [key]: value }));
-  const product = products.find((p) => p.id === productId);
-  const formats = products.filter((p) => p.brand === brand);
+
+  const brandProducts = useMemo(() => products.filter((p) => p.brand === brand), [products, brand]);
+
+  const familyOptions = useMemo(() => {
+    if (!brand || !familyDim?.active) return [];
+    const activeIds = new Set(activeFamilyValues.map((v) => v.id));
+    const options: Array<{ key: FamilyChoiceKey; label: string; count: number }> = activeFamilyValues.map((v) => ({
+      key: v.id,
+      label: v.name,
+      count: brandProducts.filter((p) => p.classifications[familyDim.id] === v.id).length,
+    }));
+    options.sort((a, b) => Number(b.count > 0) - Number(a.count > 0));
+    const uncategorizedCount = brandProducts.filter((p) => {
+      const valId = p.classifications[familyDim.id];
+      return !valId || !activeIds.has(valId);
+    }).length;
+    if (uncategorizedCount > 0) {
+      options.push({ key: "none", label: "Sem família", count: uncategorizedCount });
+    }
+    return options;
+  }, [brand, familyDim, activeFamilyValues, brandProducts]);
+
+  const availableProducts = useMemo(() => {
+    if (!brand) return [];
+    if (!requireFamily || !familyDim) return brandProducts;
+    if (familyKey === null) return [];
+    if (familyKey === "none") {
+      const activeIds = new Set(activeFamilyValues.map((v) => v.id));
+      return brandProducts.filter((p) => {
+        const valId = p.classifications[familyDim.id];
+        return !valId || !activeIds.has(valId);
+      });
+    }
+    return brandProducts.filter((p) => p.classifications[familyDim.id] === familyKey);
+  }, [brand, brandProducts, requireFamily, familyDim, familyKey, activeFamilyValues]);
+
+  // Mantém a ordem por peso (a mesma usada pelo servidor para definir a batelada principal).
+  const orderedSelected = useMemo(
+    () => availableProducts.filter((p) => selectedIds.includes(p.id)),
+    [availableProducts, selectedIds],
+  );
+  const primaryProduct = orderedSelected[0] ?? null;
+  const selectedFamilyLabel =
+    familyKey === null ? null : familyOptions.find((o) => o.key === familyKey)?.label ?? null;
+
+  function toggleProduct(id: number) {
+    if (!allowMultiFormatBatch) {
+      setSelectedIds([id]);
+      return;
+    }
+    setSelectedIds((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
+  }
+
+  function selectAllFormats() {
+    if (!allowMultiFormatBatch) return;
+    if (orderedSelected.length === availableProducts.length) {
+      setSelectedIds([]);
+    } else {
+      setSelectedIds(availableProducts.map((p) => p.id));
+    }
+  }
 
   const data: ProductionData & { notes: string } = {
     garlicLot: f.garlicLot.trim() || null,
@@ -77,13 +152,23 @@ export function BatchForm({
   };
   const orderErrors = timeOrderErrors(data);
   const missing = missingForReady(data);
-  const hasProduct = editing || productId !== null;
+  const hasProduct = editing || orderedSelected.length > 0;
   const canSave = hasProduct && orderErrors.length === 0;
   const canReady = canSave && missing.length === 0;
 
   const good = data.goodUnits ?? 0;
   const loss = data.lossUnits ?? 0;
   const yieldPct = good + loss > 0 ? (good / (good + loss)) * 100 : null;
+
+  const stepPrompt = !brand
+    ? "1. Escolha a marca"
+    : requireFamily && familyKey === null
+      ? "2. Escolha a família"
+      : orderedSelected.length === 0
+        ? allowMultiFormatBatch
+          ? "3. Marque uma ou mais gramaturas"
+          : "3. Marque uma gramatura"
+        : "Sequencial gerado ao salvar";
 
   async function submit(markReady: boolean) {
     if (!canSave || (markReady && !canReady)) return;
@@ -96,7 +181,7 @@ export function BatchForm({
       } else {
         const created = await api<{ number: number }>("/api/batches", {
           method: "POST",
-          body: { ...data, productId, markReady },
+          body: { ...data, productIds: orderedSelected.map((p) => p.id), markReady },
         });
         onDone(
           markReady
@@ -143,15 +228,18 @@ export function BatchForm({
             <div className="flex flex-wrap items-center gap-3 rounded-lg border border-line bg-card px-3 py-2.5">
               <span className="display tnum text-[30px]">#{batch.number}</span>
               <ProductTag brand={batch.brand} format={batch.format} size="md" />
+              {batch.familyName && (
+                <span className="rounded bg-paper-deep px-2 py-0.5 text-xs font-semibold text-ink-2">{batch.familyName}</span>
+              )}
               <span className="text-xs text-ink-3">Número e produto não mudam depois de criada.</span>
             </div>
           ) : products.length === 0 ? (
             <ErrorNote>Nenhum produto ativo cadastrado. Peça ao gestor para cadastrar em Admin › Produtos e embalagens.</ErrorNote>
           ) : (
             <div className="grid gap-4 sm:grid-cols-[1fr_auto]">
-              <div className="space-y-3">
+              <div className="space-y-4">
                 <div>
-                  <span className="mb-1.5 block text-[13px] font-semibold">Marca</span>
+                  <span className="mb-1.5 block text-[13px] font-semibold">1 · Marca</span>
                   <div className="flex flex-wrap gap-2">
                     {brands.map((b) => (
                       <button
@@ -160,7 +248,8 @@ export function BatchForm({
                         aria-pressed={b === brand}
                         onClick={() => {
                           setBrand(b);
-                          setProductId(null);
+                          setFamilyKey(null);
+                          setSelectedIds([]);
                         }}
                         className={cn(
                           "h-11 min-w-20 rounded-lg border-2 px-4 text-sm font-bold uppercase tracking-wide transition",
@@ -172,34 +261,129 @@ export function BatchForm({
                     ))}
                   </div>
                 </div>
-                <div>
-                  <span className="mb-1.5 block text-[13px] font-semibold">Formato</span>
-                  <div className="flex flex-wrap gap-2">
-                    {formats.map((p) => (
-                      <button
-                        key={p.id}
-                        type="button"
-                        aria-pressed={p.id === productId}
-                        onClick={() => setProductId(p.id)}
-                        className={cn(
-                          "tnum h-11 rounded-lg border-2 px-3.5 text-sm font-bold transition",
-                          p.id === productId ? "border-ink bg-ink text-paper" : "border-ink/25 bg-white text-ink hover:border-ink",
-                        )}
-                      >
-                        {p.format}
-                      </button>
-                    ))}
+
+                {brand && requireFamily && (
+                  <div>
+                    <span className="mb-1.5 block text-[13px] font-semibold">2 · Família</span>
+                    <div className="flex flex-wrap gap-2">
+                      {familyOptions.map((opt) => {
+                        const active = familyKey === opt.key;
+                        return (
+                          <button
+                            key={String(opt.key)}
+                            type="button"
+                            aria-pressed={active}
+                            onClick={() => {
+                              setFamilyKey(opt.key);
+                              setSelectedIds([]);
+                            }}
+                            className={cn(
+                              "flex h-11 items-center gap-2 rounded-lg border-2 px-3.5 text-sm font-bold transition",
+                              active
+                                ? "border-ink bg-ink text-paper"
+                                : opt.count === 0
+                                  ? "border-dashed border-ink/25 bg-paper-deep/50 text-ink-2 hover:border-ink"
+                                  : "border-ink/25 bg-white text-ink hover:border-ink",
+                            )}
+                          >
+                            <span>{opt.label}</span>
+                            <span
+                              className={cn(
+                                "tnum rounded px-1.5 py-0.5 text-[11px] font-bold leading-none",
+                                active ? "bg-paper/20 text-paper" : "bg-ink/8 text-ink-3",
+                              )}
+                            >
+                              {opt.count}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
-                </div>
+                )}
+
+                {brand && (!requireFamily || familyKey !== null) && (
+                  <div>
+                    <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-[13px] font-semibold">
+                        {requireFamily ? "3 · " : "2 · "}
+                        {allowMultiFormatBatch ? "Gramaturas" : "Gramatura"}
+                        <span className="ml-2 text-xs font-normal text-ink-3">
+                          {allowMultiFormatBatch
+                            ? orderedSelected.length > 0
+                              ? `${orderedSelected.length} selecionada(s)`
+                              : "Pode marcar uma ou várias"
+                            : "Seleção única"}
+                        </span>
+                      </span>
+                      {allowMultiFormatBatch && availableProducts.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={selectAllFormats}
+                          className="text-xs font-bold text-ink underline underline-offset-2 hover:text-ink-2"
+                        >
+                          {orderedSelected.length === availableProducts.length ? "Limpar seleção" : "Marcar todas"}
+                        </button>
+                      )}
+                    </div>
+                    {availableProducts.length === 0 ? (
+                      <p className="rounded-lg border border-dashed border-ink/25 bg-paper-deep/40 px-3 py-3 text-xs text-ink-2">
+                        Nenhuma gramatura ativa cadastrada para{" "}
+                        <strong>
+                          {brand}
+                          {selectedFamilyLabel ? ` · ${selectedFamilyLabel}` : ""}
+                        </strong>
+                        . Cadastre ou classifique os produtos em Admin › Produtos e classificações.
+                      </p>
+                    ) : (
+                      <div className="flex flex-wrap gap-2">
+                        {availableProducts.map((p) => {
+                          const checked = selectedIds.includes(p.id);
+                          return (
+                            <button
+                              key={p.id}
+                              type="button"
+                              aria-pressed={checked}
+                              onClick={() => toggleProduct(p.id)}
+                              className={cn(
+                                "tnum flex h-11 items-center gap-2 rounded-lg border-2 px-3.5 text-sm font-bold transition",
+                                checked ? "border-ink bg-ink text-paper" : "border-ink/25 bg-white text-ink hover:border-ink",
+                              )}
+                            >
+                              {allowMultiFormatBatch && (
+                                <span
+                                  aria-hidden
+                                  className={cn(
+                                    "grid size-4 place-items-center rounded border-2",
+                                    checked ? "border-hivis bg-hivis text-ink" : "border-ink/35 bg-white",
+                                  )}
+                                >
+                                  {checked && <Check className="size-3" strokeWidth={3} />}
+                                </span>
+                              )}
+                              {p.format}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
-              <div className="flex min-w-36 flex-col justify-center rounded-lg border border-dashed border-ink/35 bg-card px-4 py-3 sm:text-center">
+
+              <div className="flex min-w-40 max-w-52 flex-col justify-center rounded-lg border border-dashed border-ink/35 bg-card px-4 py-3 sm:text-center">
                 <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-ink-3">Nº da batelada</span>
-                <span className={cn("display tnum mt-1 text-[44px]", !product && "text-ink/25")}>
-                  #{product ? product.nextNumber : "—"}
+                <span className={cn("display tnum mt-1 text-[44px]", !primaryProduct && "text-ink/25")}>
+                  #{primaryProduct ? primaryProduct.nextNumber : "—"}
                 </span>
-                <span className="mt-1 text-[11px] leading-tight text-ink-3">
-                  {product ? "Sequencial deste item, gerado ao salvar" : "Escolha marca e formato"}
-                </span>
+                {orderedSelected.length > 0 && (
+                  <span className="tnum mt-1 text-xs font-bold text-ink">
+                    {brand}
+                    {selectedFamilyLabel && selectedFamilyLabel !== "Sem família" ? ` · ${selectedFamilyLabel}` : ""}
+                    <span className="block font-semibold text-ink-2">{orderedSelected.map((p) => p.format).join(" + ")}</span>
+                  </span>
+                )}
+                <span className="mt-1 text-[11px] leading-tight text-ink-3">{stepPrompt}</span>
               </div>
             </div>
           )}

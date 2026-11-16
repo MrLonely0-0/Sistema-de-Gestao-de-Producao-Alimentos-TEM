@@ -1,11 +1,11 @@
 "use client";
 
-import Link from "next/link";
+import { SplashLink as Link } from "@/components/splash-provider";
 import { ROLE_LABEL } from "@/lib/domain";
 import { useAuth } from "@/components/auth-provider";
 import { AdminPanel } from "@/components/admin-panel";
 
-export function AdminPage() {
+export function AdminPage({ initialSection }: { initialSection?: string }) {
   const user = useAuth();
 
   if (user.role !== "admin") {
@@ -15,7 +15,7 @@ export function AdminPage() {
           <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-stop">Acesso restrito</p>
           <h1 className="display mt-2 text-[28px]">Área do administrador</h1>
           <p className="mt-2 text-sm text-ink-2">
-            Seu perfil ({ROLE_LABEL[user.role]}) não tem acesso ao Painel Admin. Peça ao gestor caso precise cadastrar
+            Seu perfil ({user.profileName ?? ROLE_LABEL[user.role] ?? "Perfil personalizado"}) não tem acesso ao Painel Admin. Peça ao gestor caso precise cadastrar
             produtos ou usuários.
           </p>
           <Link
@@ -29,5 +29,5 @@ export function AdminPage() {
     );
   }
 
-  return <AdminPanel me={user} />;
+  return <AdminPanel me={user} initialSection={initialSection} />;
 }
