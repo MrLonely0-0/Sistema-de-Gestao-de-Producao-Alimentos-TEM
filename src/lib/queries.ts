@@ -12,15 +12,14 @@ import {
   products,
   shipments,
   stockAdjustments,
-  accessProfiles,
   users,
 } from "@/db/schema";
 import { loadColumns } from "@/lib/columns";
-import { getChatTitle } from "@/lib/chat-service";
+import { tagLegacyDemo } from "@/lib/demo-service";
+import { getInventoryRows } from "@/lib/inventory-queries";
+import { accessProfiles } from "@/db/schema";
 import { DRIVE_MODE, DRIVE_ROOT } from "@/lib/drive";
 import type {
-  GrantableAction,
-  AccessProfileDTO,
   AdminOverviewDTO,
   AdjustmentDTO,
   BatchDetailDTO,
@@ -39,7 +38,7 @@ import type {
   StockManageDTO,
   StockRowDTO,
 } from "@/lib/domain";
-import { STATUSES, STATUS_LABEL } from "@/lib/domain";
+import { STATUSES, STATUS_LABEL, avatarUrl } from "@/lib/domain";
 
 type BatchRow = typeof batches.$inferSelect;
 type ProductRow = typeof products.$inferSelect;
@@ -199,20 +198,13 @@ async function hydrate(rows: BatchRow[]): Promise<BatchDTO[]> {
 /** Tudo o que o painel Kanban precisa, em uma chamada. */
 export async function getBoard(): Promise<BoardDTO> {
   const alive = isNull(batches.deletedAt);
-  const [catalog, columns, openRows, stockedRows, stockedCount, produced, shipped, shipmentRows, adjustmentRows] = await Promise.all([
+  const [catalog, columns, openRows, stockedRows, stockedCount, stock, shipmentRows] = await Promise.all([
     loadCatalog(),
     loadColumns(),
     db.select().from(batches).where(and(alive, ne(batches.status, "em_estoque"))).orderBy(asc(batches.createdAt)),
     db.select().from(batches).where(and(alive, eq(batches.status, "em_estoque"))).orderBy(desc(batches.finishedAt)).limit(12),
     db.select({ n: count() }).from(batches).where(and(alive, eq(batches.status, "em_estoque"))),
-    db
-      .select({ id: batchOutputs.packagingOptionId, total: sum(batchOutputs.boxes) })
-      .from(batchOutputs)
-      .groupBy(batchOutputs.packagingOptionId),
-    db
-      .select({ id: shipments.packagingOptionId, total: sum(shipments.boxes) })
-      .from(shipments)
-      .groupBy(shipments.packagingOptionId),
+    getInventoryRows(),
     db
       .select({
         id: shipments.id,
@@ -231,37 +223,7 @@ export async function getBoard(): Promise<BoardDTO> {
       .innerJoin(products, eq(products.id, packagingOptions.productId))
       .orderBy(desc(shipments.createdAt))
       .limit(5),
-    db.select().from(stockAdjustments).where(isNull(stockAdjustments.deletedAt)),
   ]);
-
-  const producedBy = new Map(produced.map((r) => [r.id, Number(r.total ?? 0)]));
-  const shippedBy = new Map(shipped.map((r) => [r.id, Number(r.total ?? 0)]));
-  const adjustedBy = new Map<number, number>();
-  for (const a of adjustmentRows) {
-    adjustedBy.set(a.packagingOptionId, (adjustedBy.get(a.packagingOptionId) ?? 0) + a.boxes);
-  }
-  const stock: StockRowDTO[] = [];
-  for (const p of catalog.products) {
-    for (const o of catalog.packaging) {
-      if (o.productId !== p.id) continue;
-      const made = producedBy.get(o.id) ?? 0;
-      const adj = adjustedBy.get(o.id) ?? 0;
-      if (made + adj === 0) continue;
-      const out = shippedBy.get(o.id) ?? 0;
-      stock.push({
-        packagingOptionId: o.id,
-        productId: p.id,
-        brand: p.brand,
-        format: p.format,
-        label: o.label,
-        unitsPerBox: o.unitsPerBox,
-        produced: made,
-        adjusted: adj,
-        shipped: out,
-        balance: made + adj - out,
-      });
-    }
-  }
 
   return {
     columns,
@@ -315,23 +277,9 @@ export async function getBatchDetail(id: number): Promise<BatchDetailDTO | null>
 }
 
 export async function getAdminOverview(): Promise<AdminOverviewDTO> {
-  const [userRows, profileRows, chatTitle, catalog, columns, folderRows, folderCount, attachmentCounts] = await Promise.all([
-    db
-      .select({
-        id: users.id,
-        name: users.name,
-        email: users.email,
-        role: users.role,
-        profileId: users.profileId,
-        profileName: accessProfiles.name,
-        active: users.active,
-        createdAt: users.createdAt,
-      })
-      .from(users)
-      .leftJoin(accessProfiles, eq(accessProfiles.id, users.profileId))
-      .orderBy(asc(users.id)),
-    db.select().from(accessProfiles).orderBy(asc(accessProfiles.name)),
-    getChatTitle(),
+  const [userRows, profileRows, catalog, columns, folderRows, folderCount, attachmentCounts] = await Promise.all([
+    db.select().from(users).where(isNull(users.deletedAt)).orderBy(asc(users.id)),
+    db.select().from(accessProfiles).where(isNull(accessProfiles.deletedAt)).orderBy(asc(accessProfiles.id)),
     loadCatalog(),
     loadColumns(),
     db
@@ -359,8 +307,9 @@ export async function getAdminOverview(): Promise<AdminOverviewDTO> {
       name: u.name,
       email: u.email,
       role: u.role,
-      profileId: u.profileId,
-      profileName: u.profileName ?? null,
+      profileName: profileRows.find((p) => p.id === u.profileId)?.name,
+      avatarUrl: avatarUrl(u.id, u.avatarVersion),
+      bio: u.bio,
       active: u.active,
       createdAt: u.createdAt.toISOString(),
     })),
@@ -368,12 +317,10 @@ export async function getAdminOverview(): Promise<AdminOverviewDTO> {
       id: p.id,
       name: p.name,
       description: p.description,
-      baseRole: p.baseRole,
-      grants: p.grants as GrantableAction[],
+      permissions: p.permissions,
       active: p.active,
       userCount: userRows.filter((u) => u.profileId === p.id).length,
     })),
-    chatTitle,
     products: toProductDTOs(catalog),
     dimensions: catalog.dimensions,
     columns,
@@ -408,7 +355,8 @@ function inPeriod(isoDate: string, filters: ReportFilters): boolean {
 
 /** Agrega em memória (volume de chão de fábrica é pequeno) para manter uma única consulta por tabela. */
 export async function getReports(filters: ReportFilters): Promise<ReportsDTO> {
-  const [catalog, batchRows, outputRows, optionRows, productRows, shipmentRows, attachmentRows, eventRows, adjustmentRows] = await Promise.all([
+  await tagLegacyDemo();
+  const [catalog, batchRows, outputRows, optionRows, productRows, shipmentRows, attachmentRows, adjustmentRows] = await Promise.all([
     loadCatalog(true),
     db.select().from(batches).orderBy(asc(batches.createdAt)),
     db.select().from(batchOutputs),
@@ -416,7 +364,6 @@ export async function getReports(filters: ReportFilters): Promise<ReportsDTO> {
     db.select().from(products),
     db.select().from(shipments).orderBy(desc(shipments.createdAt)),
     db.select().from(attachments),
-    db.select().from(batchEvents),
     db.select().from(stockAdjustments).where(isNull(stockAdjustments.deletedAt)),
   ]);
 
@@ -512,47 +459,15 @@ export async function getReports(filters: ReportFilters): Promise<ReportsDTO> {
         r.releasedAt && r.readyAt ? (new Date(r.releasedAt).getTime() - new Date(r.readyAt).getTime()) / 3_600_000 : null,
     }));
 
-  /* Estoque e expedições */
-  const scopedOptionIds = new Set(
-    optionRows.filter((o) => eligible.some((b) => b.productId === o.productId)).map((o) => o.id),
-  );
-  const shipmentsInScope = shipmentRows.filter(
-    (s) => scopedOptionIds.has(s.packagingOptionId) && inPeriod(s.createdAt.toISOString(), filters),
-  );
-  const producedByOption = new Map<number, number>();
-  for (const outs of outputsByBatch.values()) {
-    for (const o of outs) producedByOption.set(o.packagingOptionId, (producedByOption.get(o.packagingOptionId) ?? 0) + o.boxes);
-  }
-  const shippedByOption = new Map<number, number>();
-  for (const s of shipmentsInScope) shippedByOption.set(s.packagingOptionId, (shippedByOption.get(s.packagingOptionId) ?? 0) + s.boxes);
-  const adjustedByOption = new Map<number, number>();
-  for (const a of adjustmentRows) {
-    if (!scopedOptionIds.has(a.packagingOptionId) || !inPeriod(a.createdAt.toISOString(), filters)) continue;
-    adjustedByOption.set(a.packagingOptionId, (adjustedByOption.get(a.packagingOptionId) ?? 0) + a.boxes);
-  }
-  const stock: StockRowDTO[] = [];
-  for (const o of optionRows) {
-    if (!scopedOptionIds.has(o.id)) continue;
-    const made = producedByOption.get(o.id) ?? 0;
-    const adj = adjustedByOption.get(o.id) ?? 0;
-    if (made + adj === 0 && !shippedByOption.has(o.id)) continue;
-    const p = productById.get(o.productId);
-    if (!p) continue;
-    const out = shippedByOption.get(o.id) ?? 0;
-    stock.push({
-      adjusted: adj,
-      packagingOptionId: o.id,
-      productId: o.productId,
-      brand: p.brand,
-      format: p.format,
-      label: o.label,
-      unitsPerBox: o.unitsPerBox,
-      produced: made,
-      shipped: out,
-      balance: made + adj - out,
-    });
-  }
-  stock.sort((a, b) => a.brand.localeCompare(b.brand) || weightOf(a.format) - weightOf(b.format) || a.unitsPerBox - b.unitsPerBox);
+  /* Saldo atual: usa o mesmo livro do Kanban/gestão, incluindo itens manuais sem batelada.
+   * O período/status filtra produção; marca/produto também filtram o estoque. */
+  const matchingProducts = new Set(productRows.filter((p) =>
+    (!filters.brand || p.brand === filters.brand) && (!filters.productId || p.id === filters.productId),
+  ).map((p) => p.id));
+  const scopedOptionIds = new Set(optionRows.filter((o) => matchingProducts.has(o.productId)).map((o) => o.id));
+  const shipmentsInScope = shipmentRows.filter((s) => scopedOptionIds.has(s.packagingOptionId) && inPeriod(s.createdAt.toISOString(), filters));
+  const stock = (await getInventoryRows()).filter((r) => matchingProducts.has(r.productId));
+  const adjustedInScope = adjustmentRows.filter((a) => scopedOptionIds.has(a.packagingOptionId) && inPeriod(a.createdAt.toISOString(), filters));
 
   const shipmentDTOs = shipmentsInScope.map((s) => {
     const o = optionById.get(s.packagingOptionId);
@@ -586,13 +501,14 @@ export async function getReports(filters: ReportFilters): Promise<ReportsDTO> {
   const lossUnits = rows.reduce((acc, r) => acc + (r.lossUnits ?? 0), 0);
   const boxes = rows.reduce((acc, r) => acc + r.producedBoxes, 0);
   const shippedBoxes = shipmentsInScope.reduce((acc, s) => acc + s.boxes, 0);
-  const adjustedBoxes = [...adjustedByOption.values()].reduce((acc, n) => acc + n, 0);
+  const adjustedBoxes = adjustedInScope.reduce((acc, a) => acc + a.boxes, 0);
   const releaseHours = quality.map((q) => q.leadHours).filter((h): h is number => h !== null && h >= 0);
   const statusBreakdown = STATUSES.map((status) => ({ status, count: rows.filter((r) => r.status === status).length })).filter(
     (x) => x.count > 0,
   );
 
   return {
+    demoBatches: batchRows.filter((b) => b.isDemo).length,
     filters,
     generatedAt: new Date().toISOString(),
     kpis: {
@@ -603,7 +519,7 @@ export async function getReports(filters: ReportFilters): Promise<ReportsDTO> {
       boxes,
       adjustedBoxes,
       shipped: shippedBoxes,
-      balance: boxes + adjustedBoxes - shippedBoxes,
+      balance: stock.reduce((acc, r) => acc + r.balance, 0),
       released: rows.filter((r) => !!r.releasedAt).length,
       retained: rows.filter((r) => r.status === "retido" || !!r.heldAt).length,
       avgReleaseHours: releaseHours.length ? releaseHours.reduce((a, b) => a + b, 0) / releaseHours.length : null,
@@ -627,103 +543,47 @@ export { STATUS_LABEL };
 /* ───────────── Gestão de estoque ───────────── */
 
 export async function getStockManage(): Promise<StockManageDTO> {
-  const [catalog, produced, shipped, adjustmentRows, shipmentRows] = await Promise.all([
-    loadCatalog(),
-    db
-      .select({ id: batchOutputs.packagingOptionId, total: sum(batchOutputs.boxes) })
-      .from(batchOutputs)
-      .groupBy(batchOutputs.packagingOptionId),
-    db
-      .select({ id: shipments.packagingOptionId, total: sum(shipments.boxes) })
-      .from(shipments)
-      .groupBy(shipments.packagingOptionId),
-    db.select().from(stockAdjustments).where(isNull(stockAdjustments.deletedAt)).orderBy(desc(stockAdjustments.createdAt)),
-    db
-      .select({
-        id: shipments.id,
-        brand: products.brand,
-        format: products.format,
-        label: packagingOptions.label,
-        unitsPerBox: packagingOptions.unitsPerBox,
-        packagingOptionId: packagingOptions.id,
-        boxes: shipments.boxes,
-        orderRef: shipments.orderRef,
-        customer: shipments.customer,
-        createdByName: shipments.createdByName,
-        createdAt: shipments.createdAt,
-      })
-      .from(shipments)
+  const [catalog, rows, adjustmentRows, shipmentRows, receiptRows] = await Promise.all([
+    loadCatalog(true),
+    getInventoryRows(),
+    db.select().from(stockAdjustments).where(isNull(stockAdjustments.deletedAt)).orderBy(desc(stockAdjustments.createdAt), desc(stockAdjustments.id)).limit(200),
+    db.select({
+      id: shipments.id, brand: products.brand, format: products.format,
+      label: packagingOptions.label, unitsPerBox: packagingOptions.unitsPerBox,
+      boxes: shipments.boxes, orderRef: shipments.orderRef, customer: shipments.customer,
+      createdByName: shipments.createdByName, createdAt: shipments.createdAt,
+    }).from(shipments)
       .innerJoin(packagingOptions, eq(packagingOptions.id, shipments.packagingOptionId))
       .innerJoin(products, eq(products.id, packagingOptions.productId))
-      .orderBy(desc(shipments.createdAt))
-      .limit(100),
+      .orderBy(desc(shipments.createdAt), desc(shipments.id)).limit(100),
+    db.select({
+      id: batchOutputs.id, batchId: batches.id, batchNumber: batches.number,
+      brand: batches.brand, format: batches.format, label: batchOutputs.label,
+      unitsPerBox: batchOutputs.unitsPerBox, boxes: batchOutputs.boxes,
+      finishedAt: batches.finishedAt, finishedByName: batches.finishedByName,
+    }).from(batchOutputs).innerJoin(batches, eq(batches.id, batchOutputs.batchId))
+      .where(eq(batches.status, "em_estoque"))
+      .orderBy(desc(batches.finishedAt), desc(batchOutputs.id)).limit(100),
   ]);
-  const producedBy = new Map(produced.map((r) => [r.id, Number(r.total ?? 0)]));
-  const shippedBy = new Map(shipped.map((r) => [r.id, Number(r.total ?? 0)]));
-  const adjustedBy = new Map<number, number>();
-  for (const a of adjustmentRows) {
-    adjustedBy.set(a.packagingOptionId, (adjustedBy.get(a.packagingOptionId) ?? 0) + a.boxes);
-  }
-
-  const rows: StockRowDTO[] = catalog.packaging.map((o) => {
-    const p = catalog.products.find((x) => x.id === o.productId);
-    const made = producedBy.get(o.id) ?? 0;
-    const adj = adjustedBy.get(o.id) ?? 0;
-    const out = shippedBy.get(o.id) ?? 0;
-    return {
-      packagingOptionId: o.id,
-      productId: o.productId,
-      brand: p?.brand ?? "—",
-      format: p?.format ?? "—",
-      label: o.label,
-      unitsPerBox: o.unitsPerBox,
-      produced: made,
-      adjusted: adj,
-      shipped: out,
-      balance: made + adj - out,
-    };
-  });
-  rows.sort((a, b) => a.brand.localeCompare(b.brand) || a.format.localeCompare(b.format) || a.unitsPerBox - b.unitsPerBox);
-
-  const optionById = new Map(catalog.packaging.map((o) => [o.id, o]));
+  const liveOptions = new Set(rows.map((r) => r.packagingOptionId));
   const adjustments: AdjustmentDTO[] = adjustmentRows.map((a) => {
-    const o = optionById.get(a.packagingOptionId);
-    const p = o ? catalog.products.find((x) => x.id === o.productId) : undefined;
+    const o = catalog.packaging.find((p) => p.id === a.packagingOptionId);
+    const p = catalog.products.find((p) => p.id === o?.productId);
     return {
-      id: a.id,
-      packagingOptionId: a.packagingOptionId,
-      productId: o?.productId ?? 0,
-      brand: p?.brand ?? "—",
-      format: p?.format ?? "—",
-      label: o?.label ?? "—",
-      unitsPerBox: o?.unitsPerBox ?? 0,
-      boxes: a.boxes,
-      reason: a.reason,
-      createdByName: a.createdByName,
-      createdAt: a.createdAt.toISOString(),
-      updatedAt: a.updatedAt.toISOString(),
+      id: a.id, packagingOptionId: a.packagingOptionId, productId: o?.productId ?? 0,
+      brand: p?.brand ?? "—", format: p?.format ?? "—", label: o?.label ?? "—", unitsPerBox: o?.unitsPerBox ?? 0,
+      boxes: a.boxes, reason: a.reason, kind: a.kind,
+      canModify: a.kind === "manual" && liveOptions.has(a.packagingOptionId),
+      createdByName: a.createdByName, createdAt: a.createdAt.toISOString(), updatedAt: a.updatedAt.toISOString(),
     };
   });
-
   return {
-    rows,
-    adjustments,
+    rows, adjustments,
+    receipts: receiptRows.filter((r) => r.finishedAt !== null).map((r) => ({ ...r, finishedAt: r.finishedAt!.toISOString() })),
     shipments: shipmentRows.map((s) => ({
-      id: s.id,
-      brand: s.brand,
-      format: s.format,
-      label: `${s.label} c/ ${s.unitsPerBox}`,
-      boxes: s.boxes,
-      orderRef: s.orderRef,
-      customer: s.customer,
-      createdByName: s.createdByName,
-      createdAt: s.createdAt.toISOString(),
+      ...s, label: `${s.label} c/ ${s.unitsPerBox}`, createdAt: s.createdAt.toISOString(),
     })),
-    products: toProductDTOs(catalog).map((p) => ({
-      id: p.id,
-      brand: p.brand,
-      format: p.format,
-      packaging: p.packaging,
-    })),
+    products: toProductDTOs(catalog).filter((p) => p.active && !catalog.products.find((r) => r.id === p.id)?.deletedAt)
+      .map((p) => ({ id: p.id, brand: p.brand, format: p.format, packaging: p.packaging.filter((o) => o.active) })),
   };
 }

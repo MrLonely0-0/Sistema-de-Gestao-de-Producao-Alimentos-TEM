@@ -1,6 +1,7 @@
 "use client";
 
-import { Truck } from "lucide-react";
+import { SplashLink as Link } from "@/components/splash-provider";
+import { ArrowUpRight, Truck } from "lucide-react";
 import type { ShipmentDTO, StockRowDTO } from "@/lib/domain";
 import { fmtInt, fmtShort, packLabel } from "@/lib/client";
 import { Button, ProductTag } from "@/components/ui";
@@ -64,6 +65,10 @@ export function StockPanel({
           ))}
         </ul>
       )}
+
+      <Link href="/estoque" className="flex min-h-10 items-center justify-between gap-2 border-t border-line px-3 py-2 text-xs font-semibold text-ink-2 transition hover:bg-paper-deep/50 hover:text-ink">
+        Gerenciar estoque <ArrowUpRight aria-hidden className="size-3.5" />
+      </Link>
 
       {shipments.length > 0 && (
         <details className="border-t border-line">

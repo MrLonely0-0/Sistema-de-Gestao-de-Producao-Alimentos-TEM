@@ -6,50 +6,40 @@
 
 /* ───────────── Perfis ───────────── */
 
-export const ROLES = ["admin", "producao", "qualidade", "acabamento", "logistica", "consulta"] as const;
-export type Role = (typeof ROLES)[number];
+export const ROLES = ["admin", "producao", "qualidade", "acabamento", "logistica"] as const;
+export type Role = (typeof ROLES)[number] | `custom:${number}`;
 
-export const ROLE_LABEL: Record<Role, string> = {
+export const ROLE_LABEL: Record<string, string> = {
   admin: "Administrador",
   producao: "Operador de Produção",
   qualidade: "Inspetor de Qualidade",
   acabamento: "Operador de Acabamento",
   logistica: "Estoque e Logística",
-  consulta: "Somente consulta",
 };
 
-/** Ações que um perfil personalizado pode receber além do papel-base. */
-export const GRANTABLE_ACTIONS = [
-  "criar",
-  "editar",
-  "marcar_pronto",
-  "liberar",
-  "reter",
-  "devolver",
-  "finalizar",
-  "separar",
-] as const;
-export type GrantableAction = (typeof GRANTABLE_ACTIONS)[number];
-export const GRANT_LABEL: Record<GrantableAction, string> = {
-  criar: "Abrir novas bateladas",
-  editar: "Editar dados de produção",
-  marcar_pronto: "Marcar lote como Pronto",
-  liberar: "Liberar lote (Qualidade)",
-  reter: "Reter lote (Qualidade)",
-  devolver: "Devolver lote à Produção",
-  finalizar: "Definir caixas e finalizar",
-  separar: "Separar pedidos e ajustar estoque",
-};
+export function roleLabel(role: Role, profiles: Array<{ id: number; name: string }> = []): string {
+  if (role.startsWith("custom:")) return profiles.find((p) => `custom:${p.id}` === role)?.name ?? "Perfil personalizado";
+  return ROLE_LABEL[role] ?? role;
+}
 
 export interface SessionUser {
   id: number;
   name: string;
   email: string;
   role: Role;
-  /** Nome do perfil personalizado (null quando usa o papel padrão). */
-  profileName: string | null;
-  /** Permissões extras concedidas pelo perfil personalizado. */
-  grants: GrantableAction[];
+  profileName?: string;
+  permissions?: Action[];
+  avatarUrl?: string | null;
+  bio?: string | null;
+}
+
+export interface MyProfileDTO extends SessionUser {
+  avatarUrl: string | null;
+  bio: string | null;
+}
+
+export function avatarUrl(id: number, version: string | null | undefined): string | null {
+  return version ? `/api/users/${id}/avatar?v=${encodeURIComponent(version)}` : null;
 }
 
 /* ───────────── Status e colunas ───────────── */
@@ -177,7 +167,7 @@ export function featureOn(columns: ColumnDTO[], feature: ColumnFeature, status?:
 /* ───────────── Permissões (RBAC) ───────────── */
 
 export type TransitionAction = "marcar_pronto" | "liberar" | "reter" | "devolver" | "finalizar";
-export type Action = TransitionAction | "criar" | "editar" | "separar";
+export type Action = TransitionAction | "criar" | "editar" | "separar" | "anexar";
 
 export const ACTION_ROLE: Record<Action, Role> = {
   criar: "producao",
@@ -188,6 +178,7 @@ export const ACTION_ROLE: Record<Action, Role> = {
   devolver: "qualidade",
   finalizar: "acabamento",
   separar: "logistica",
+  anexar: "qualidade",
 };
 
 export const ACTION_LABEL: Record<Action, string> = {
@@ -199,6 +190,7 @@ export const ACTION_LABEL: Record<Action, string> = {
   devolver: "Devolver à Produção",
   finalizar: "Definir caixas e enviar ao estoque",
   separar: "Separar pedido para expedição",
+  anexar: "Anexar laudos e fotos",
 };
 
 export const TRANSITIONS: Record<TransitionAction, { from: Status[]; to: Status }> = {
@@ -209,23 +201,20 @@ export const TRANSITIONS: Record<TransitionAction, { from: Status[]; to: Status 
   finalizar: { from: ["liberado"], to: "em_estoque" },
 };
 
-export function can(role: Role, action: Action): boolean {
-  return role === "admin" || ACTION_ROLE[action] === role;
-}
-
-/** Permissão efetiva: papel padrão OU permissão extra do perfil personalizado. */
-export function canUser(user: Pick<SessionUser, "role" | "grants">, action: Action): boolean {
-  if (can(user.role, action)) return true;
-  return (user.grants as string[]).includes(action);
+export function can(role: Role, action: Action, permissions: readonly Action[] = []): boolean {
+  if (role === "admin") return true;
+  if (role.startsWith("custom:")) return permissions.includes(action);
+  return ACTION_ROLE[action] === role;
 }
 
 export const ATTACHMENT_KINDS = ["laudo", "foto"] as const;
 export type AttachmentKind = (typeof ATTACHMENT_KINDS)[number];
 
 /** Anexos: a Qualidade pode anexar sempre; os demais só enquanto o card está na sua coluna. */
-export function canAttach(role: Role, status: Status): boolean {
+export function canAttach(role: Role, status: Status, permissions: readonly Action[] = []): boolean {
   if (role === "admin" || role === "qualidade") return true;
-  return STAGE_META[STAGE_OF[status]].role === role && role !== "logistica" && role !== "consulta";
+  if (role.startsWith("custom:")) return permissions.includes("anexar");
+  return STAGE_META[STAGE_OF[status]].role === role && role !== "logistica";
 }
 
 /* ───────────── Checklist para marcar "Pronto" ───────────── */
@@ -404,6 +393,30 @@ export interface StockRowDTO {
   balance: number;
 }
 
+export interface InventoryRowDTO extends StockRowDTO {
+  id: number;
+  name: string | null;
+  location: string | null;
+  notes: string | null;
+  source: "manual" | "production" | "import";
+  revision: number;
+  updatedAt: string;
+  updatedByName: string;
+}
+
+export interface StockReceiptDTO {
+  id: number;
+  batchId: number;
+  batchNumber: number;
+  brand: string;
+  format: string;
+  label: string;
+  unitsPerBox: number;
+  boxes: number;
+  finishedAt: string;
+  finishedByName: string | null;
+}
+
 export interface AdjustmentDTO {
   id: number;
   packagingOptionId: number;
@@ -414,13 +427,16 @@ export interface AdjustmentDTO {
   unitsPerBox: number;
   boxes: number;
   reason: string;
+  kind: "manual" | "opening" | "balance_edit" | "item_delete";
+  canModify: boolean;
   createdByName: string;
   createdAt: string;
   updatedAt: string;
 }
 
 export interface StockManageDTO {
-  rows: StockRowDTO[];
+  rows: InventoryRowDTO[];
+  receipts: StockReceiptDTO[];
   adjustments: AdjustmentDTO[];
   shipments: ShipmentDTO[];
   products: Array<{ id: number; brand: string; format: string; packaging: PackagingDTO[] }>;
@@ -447,25 +463,37 @@ export interface BoardDTO {
   stockedTotal: number;
 }
 
+export interface AccessProfileDTO {
+  id: number;
+  name: string;
+  description: string | null;
+  permissions: Action[];
+  active: boolean;
+  userCount: number;
+}
+
 export interface AdminUserDTO {
   id: number;
   name: string;
   email: string;
   role: Role;
-  profileId: number | null;
-  profileName: string | null;
+  profileName?: string;
+  avatarUrl?: string | null;
+  bio?: string | null;
   active: boolean;
   createdAt: string;
 }
 
-export interface AccessProfileDTO {
-  id: number;
-  name: string;
-  description: string;
-  baseRole: Role;
-  grants: GrantableAction[];
-  active: boolean;
-  userCount: number;
+export interface DataMaintenanceDTO {
+  version: string;
+  demoBatches: number;
+  demoShipments: number;
+  demoBoxes: number;
+  realBatches: number;
+  cleanedAt: string | null;
+  cleanedByName: string | null;
+  blockers: string[];
+  batches: Array<{ id: number; number: number; brand: string; format: string; status: Status; createdAt: string }>;
 }
 
 export interface DriveFolderDTO {
@@ -545,6 +573,7 @@ export interface ReportDayPoint {
 }
 
 export interface ReportsDTO {
+  demoBatches: number;
   filters: ReportFilters;
   generatedAt: string;
   kpis: {
@@ -573,10 +602,51 @@ export interface ReportsDTO {
   totalAttachments: number;
 }
 
+export interface ChatChannelDTO {
+  id: number;
+  name: string;
+  description: string | null;
+  kind: "channel" | "direct";
+  peerName?: string | null;
+  messageCount: number;
+  unreadCount: number;
+  lastMessage: string | null;
+  lastAt: string | null;
+}
+
+export interface ChatMessageDTO {
+  id: number;
+  authorId?: number | null;
+  isMine?: boolean;
+  avatarUrl?: string | null;
+  channelId: number;
+  authorName: string;
+  authorRole: Role;
+  content: string;
+  imageData: string | null;
+  imageName: string | null;
+  createdAt: string;
+  editedAt: string | null;
+  canEdit: boolean;
+  canDelete: boolean;
+}
+
+export interface ChatDTO {
+  channels: ChatChannelDTO[];
+  direct: ChatChannelDTO[];
+  messages: ChatMessageDTO[];
+  peers: Array<{ id: number; name: string; roleLabel: string }>;
+  activeChannelId: number | null;
+}
+
+export interface ChatUnreadDTO {
+  total: number;
+  byChannel: Array<{ id: number; name: string; kind: "channel" | "direct"; unread: number }>;
+}
+
 export interface AdminOverviewDTO {
   users: AdminUserDTO[];
   profiles: AccessProfileDTO[];
-  chatTitle: string;
   products: ProductDTO[];
   dimensions: DimensionDTO[];
   columns: ColumnDTO[];

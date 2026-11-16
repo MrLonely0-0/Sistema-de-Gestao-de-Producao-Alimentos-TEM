@@ -152,6 +152,12 @@ function withToken(url: string, token: string | null): string {
   return `${url}${separator}t=${encodeURIComponent(token)}`;
 }
 
+/** Fotos de usuários só são servidas a sessões válidas; nunca adiciona token a domínio externo. */
+export function authorizedAssetUrl(path: string): string {
+  if (!path.startsWith("/") || path.startsWith("//")) return "";
+  return withToken(path, getToken());
+}
+
 export async function api<T = unknown>(
   url: string,
   opts: { method?: string; body?: unknown; redirectOn401?: boolean } = {},
@@ -180,6 +186,10 @@ export async function api<T = unknown>(
   }
   if (!res.ok) {
     throw new HttpError(res.status, data?.error ?? "Não foi possível concluir a operação.");
+  }
+  const method = (opts.method ?? "GET").toUpperCase();
+  if (typeof window !== "undefined" && method !== "GET" && /^\/api\/(batches|stock|shipments|admin\/(products|data))/.test(url)) {
+    window.dispatchEvent(new Event("tem:data-changed"));
   }
   return data as T;
 }

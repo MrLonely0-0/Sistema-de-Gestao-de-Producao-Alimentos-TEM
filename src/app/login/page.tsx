@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { getSessionUser } from "@/lib/auth";
 import { STAGE_META, STAGES } from "@/lib/domain";
 import { ensureReady } from "@/lib/seed";
+import { AppFooter } from "@/components/app-footer";
 import { LoginForm } from "@/components/login-form";
 import { Logo } from "@/components/top-bar";
 
@@ -11,13 +12,13 @@ export const dynamic = "force-dynamic";
 
 const SETUP_HELP = {
   schema: {
-    title: "Banco de dados ainda sem tabelas",
-    body: "Aplique o schema uma vez e recarregue esta página:",
-    code: "npx drizzle-kit push",
+    title: "Banco de dados precisa aplicar ou atualizar o schema",
+    body: "Execute a migração e aplique o schema uma vez no PostgreSQL e recarregue esta página:",
+    code: "npm run db:migrate && npx drizzle-kit push",
   },
   admin_env: {
     title: "Defina o primeiro administrador",
-    body: "Com DEMO_MODE=off, configure as variáveis de ambiente abaixo (senha com 8+ caracteres) e recarregue:",
+    body: "Em um banco vazio, configure o primeiro administrador nas variáveis abaixo (senha com 8+ caracteres) e recarregue:",
     code: "ADMIN_EMAIL=...  ADMIN_PASSWORD=...",
   },
   db: {
@@ -34,7 +35,7 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
   if (user) redirect("/");
 
   return (
-    <div className="grid min-h-dvh lg:grid-cols-[1.05fr_1fr]">
+    <div className="grid min-h-dvh lg:grid-cols-[1.05fr_1fr] lg:grid-rows-[1fr_auto]">
       <aside className="on-dark relative flex flex-col justify-between gap-10 overflow-hidden bg-ink px-6 py-7 text-paper sm:px-10 lg:py-10">
         <div aria-hidden className="absolute -right-10 top-0 h-full w-24 -skew-x-12 bg-hivis/90 max-lg:hidden" />
         <Logo />
@@ -78,6 +79,9 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
           )}
         </div>
       </main>
+      <div className="col-span-full">
+        <AppFooter />
+      </div>
     </div>
   );
 }

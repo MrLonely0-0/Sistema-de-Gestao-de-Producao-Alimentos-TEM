@@ -57,7 +57,11 @@ No computador dá para **arrastar o card** para a coluna seguinte; em tablet/cel
 
 ## 1.2 Gestão de estoque, painéis e alteração em massa
 
-- **Gestão de estoque** (`/estoque`): saldo por embalagem (produzido + ajustes − expedido), lançamento de **ajustes** de entrada/baixa com motivo, e **editar/excluir** ajustes e expedições. Toda operação valida o saldo para não ficar negativo; a exclusão do ajuste é lógica (motivo fica para auditoria) e a da expedição devolve as caixas ao saldo. Permissão: Logística e Admin, e depende da funcionalidade "separar" estar ligada.
+- **Gestão de estoque** (`/estoque`): o administrador tem **Novo item**, **Editar** e **Excluir** diretamente na tabela de saldos. Escolhe produto + embalagem (ou cadastra uma embalagem nova), saldo inicial, nome, localização e observações. Na edição, informa o saldo total desejado e o motivo; o sistema registra a diferença sem alterar a produção histórica. Itens com saldo zero continuam visíveis.
+- **Entrada automática de produção:** finalizar uma batelada e criar/somar seus itens de estoque ocorrem na mesma transação. A numeração única dos outputs e o bloqueio da batelada impedem contabilização duplicada. A seção **Entradas da produção** mostra batelada, embalagem, quantidade, responsável e data. Estoque e Kanban atualizam a cada 8 segundos.
+- **Exclusão de item:** grava baixa do saldo restante, retira o item da lista e preserva produção/expedições/histórico. Uma nova batelada finalizada da mesma embalagem reabre o item só com as novas caixas. O produto e a embalagem não são apagados. Novo item também permite recadastrar uma embalagem anteriormente excluída.
+- **Consistência e acessos:** só Admin cria/edita/exclui itens; Logística mantém os ajustes e separações permitidos. Saldo = produção + ajustes − expedições. Todas as escritas usam a mesma trava da embalagem; editar ou excluir com uma versão desatualizada retorna 409 para não apagar uma entrada recente. Movimentos gerados pelo cadastro são imutáveis, ajustes manuais permanecem editáveis. Os itens antigos são migrados sem alteração do saldo.
+- **Relatório de estoque:** apresenta o saldo atual (o mesmo de `/estoque`), filtrado por marca/produto e incluindo itens criados manualmente. O período e o status continuam filtrando os relatórios de produção; separações respeitam o período.
 - **Painéis do quadro** (Admin › Painéis do quadro): **adicionar, editar, excluir, ativar/desativar e reordenar** colunas do Kanban; escolher nome, subtítulo, cor, perfil responsável, quais status aparecem e quais **funcionalidades** ficam habilitadas (abrir, editar, liberar, reter, devolver, finalizar, separar, anexar, excluir) e onde o saldo de estoque aparece. Desligar uma funcionalidade bloqueia a ação **também na API**. Um status não pode estar em dois painéis e precisa sempre pertencer a algum painel ativo.
 - **Alteração em massa** (Admin › Produtos e classificações): marque produtos individualmente ou "Selecionar todos" e altere marca, família, grupo e outras separações de uma vez, mantendo as demais. Trocar a marca propaga para as bateladas antigas.
 - **Família → produtos e gramaturas**: ao filtrar por família (ou outra separação), aparece uma tabela com as gramaturas encontradas e, para cada produto, marca, classificações, próxima batelada e embalagens.
@@ -93,6 +97,46 @@ Ordem de tentativa:
 
    O comando imprime uma URL `https://<nome>.trycloudflare.com`. É pública e não pede o cabeçalho, mas é **temporária** (sem garantia de uptime e morre se o sandbox reiniciar).
 4. Solução definitiva: o deploy na Vercel + Neon da seção 4 gera uma URL pública permanente, sem token de sandbox.
+
+## 1.4 Perfis personalizados e conversa
+
+**Admin › Perfis de acesso:** crie um perfil com nome e descrição próprios, marque as ações permitidas e vincule-o aos usuários em Admin › Usuários. As permissões são verificadas no servidor em produção, qualidade, acabamento, estoque e anexos. Todos os perfis veem o painel e a conversa; o Painel Admin continua exclusivo de `admin`. Desativar um perfil encerra o acesso dos usuários vinculados. Para excluí-lo em uso, selecione um perfil substituto; a transferência e a exclusão acontecem na mesma transação.
+
+**Conversa** (link na barra superior, `/chat`): canais "Geral", "Produção", "Qualidade" e "Logística" criados na inicialização. Todos os usuários autenticados podem conversar. O admin cria, renomeia e arquiva canais; cada colaborador edita/exclui as próprias mensagens (o admin pode moderar). Mensagens e estado de leitura ficam no PostgreSQL; exclusão de mensagem arquivamento de canal são lógicos, preservando auditoria. Atualização a cada 5 segundos, Enter envia e Shift+Enter quebra linha.
+
+**Hospedagem pública permanente:** este ambiente não possui credenciais de publicação (Vercel/Fly/Render/etc.). O endereço E2B é interno ao sandbox, exige o token da plataforma e muda quando o sandbox é reciclado. Não foi criado nenhum túnel ou host público nesta versão.
+
+## 1.5 Backup do banco e hospedagem gratuita
+
+### Banco de dados completo
+
+O arquivo **`backups/alimentos-tem-completo.sql`** é um dump PostgreSQL completo (estrutura + dados, com `DROP ... IF EXISTS` para restauração limpa). Para gerar um novo a qualquer momento:
+
+```bash
+DATABASE_URL="postgresql://usuario:senha@host:5432/banco" ./scripts/backup.sh
+```
+
+Restauração:
+
+```bash
+createdb alimentos_tem
+psql "postgresql://usuario:senha@host:5432/alimentos_tem" -f backups/alimentos-tem-completo.sql
+```
+
+O dump inclui usuários (com hash scrypt das senhas), produtos, classificações, painéis, bateladas, estoque, conversas e auditoria. **Trate o arquivo como confidencial** (contém hashes de senha) e não o versione em repositório público.
+
+### Onde hospedar de graça
+
+| Camada | Serviço gratuito | Limites práticos |
+| --- | --- | --- |
+| Banco PostgreSQL | **Neon Free** (neon.com) | ~0,5 GB, suspende quando ocioso, conexão pooled com SSL |
+| Aplicação Next.js | **Vercel Hobby** | Gratuito, mas **apenas uso pessoal/não comercial** |
+| Alternativa comercial | **Render Free** web service | Dorme após 15 min sem tráfego, sem SLA |
+| Alternativa comercial | **Fly.io** (crédito inicial) | Requer cartão |
+
+Para uso comercial real da Alimentos TEM, o plano Hobby da Vercel não é adequado; use Render pago, Railway, Fly.io ou VPS. Passo a passo completo de publicação, variáveis (`DATABASE_URL`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `DEMO_MODE`) e migração (`npx drizzle-kit push`) está na seção 4.
+
+**Sobre o sandbox atual:** a proteção `e2b-traffic-access-token` é aplicada pela plataforma antes da aplicação e não pode ser desligada pelo código. Por isso este ambiente não entrega URL pública permanente; o acesso funciona pelo Preview da plataforma enquanto o sandbox existir.
 
 ## 2. Estrutura do código
 
@@ -155,9 +199,9 @@ npx drizzle-kit push        # cria as tabelas
 npm run dev                 # http://localhost:3000
 ```
 
-Na primeira abertura o sistema garante a conta do gestor (`ADMIN_EMAIL` / `ADMIN_PASSWORD`), cadastra o catálogo (TEM e Feliz × 160 g, 450 g, 1 kg, 2 kg, 3 kg, com embalagens e classificações de exemplo) e, em modo demonstração, algumas bateladas de exemplo.
+Em um banco vazio, na primeira abertura o sistema cria a conta do gestor (`ADMIN_EMAIL` / `ADMIN_PASSWORD`), cadastra o catálogo (TEM e Feliz × 160 g, 450 g, 1 kg, 2 kg, 3 kg, com embalagens e classificações de exemplo) e, em modo demonstração, algumas bateladas de exemplo.
 
-**A tela de login mostra apenas e-mail e senha** — não há contas de exemplo nem credenciais expostas. A conta do gestor é garantida a cada inicialização; a senha de uma conta existente **nunca** é sobrescrita. Troque a senha em **Admin › Usuários** e defina `ADMIN_EMAIL`/`ADMIN_PASSWORD` no provedor para o uso real. Os demais usuários são criados pelo gestor em **Admin › Usuários e perfis**.
+**A tela de login mostra apenas e-mail e senha** — não há contas de exemplo nem credenciais expostas. O primeiro administrador só é criado quando não existe nenhuma conta no banco. Depois disso, alterações de e-mail, senha, perfil e exclusões não são desfeitas pela inicialização. Troque a senha em **Admin › Usuários** e defina `ADMIN_EMAIL`/`ADMIN_PASSWORD` no provedor para o uso real. Os demais usuários são criados pelo gestor em **Admin › Usuários e perfis**.
 
 ## 4. Colocar na nuvem sem custo (passo a passo)
 
@@ -183,7 +227,7 @@ npx drizzle-kit push --dialect=postgresql --schema=./src/db/schema.ts --url="COL
 | `ADMIN_PASSWORD` | senha inicial (8+ caracteres) |
 | `COOKIE_SAMESITE` | `lax` — modo mais restrito do cookie de sessão |
 
-**Passo 5 — Primeiro acesso.** Abra a URL gerada, entre com `ADMIN_EMAIL`/`ADMIN_PASSWORD` e, em **Admin**, troque a senha do gestor, crie os usuários de cada posto e revise produtos e embalagens. Mantenha as duas variáveis configuradas na Vercel: se a conta do gestor for apagada, ela é recriada no próximo boot.
+**Passo 5 — Primeiro acesso.** Abra a URL gerada, entre com `ADMIN_EMAIL`/`ADMIN_PASSWORD` e, em **Admin**, troque a senha do gestor, crie os usuários de cada posto e revise produtos e embalagens. Essas variáveis são usadas apenas no primeiro cadastro; contas excluídas não são recriadas nos próximos boots.
 
 A cada `git push`, a Vercel publica a nova versão sozinha. Se mudar `schema.ts`, repita o Passo 3.
 
@@ -200,8 +244,8 @@ Confira os limites vigentes de cada serviço antes de depender deles — eles mu
 | Variável | Obrigatória | Para quê |
 | --- | --- | --- |
 | `DATABASE_URL` | sim | Conexão PostgreSQL |
-| `DEMO_MODE` | não (padrão: ligado) | `off` desliga apenas as bateladas de exemplo (nunca cria contas de demonstração; a tela de login não exibe credenciais) |
-| `ADMIN_EMAIL`, `ADMIN_PASSWORD` | não | Conta do gestor. Padrão: `vinicius@tem.com.br` / `#Vini2183`. Criada se faltar e promovida a admin se existir — em todo boot |
+| `DEMO_MODE` | não (padrão: `off`) | Apenas `on`, `true` ou `1` permitem gerar exemplos num banco novo. Depois da limpeza, não são recriados mesmo com essa variável ligada |
+| `ADMIN_EMAIL`, `ADMIN_PASSWORD` | na primeira instalação | Credenciais do primeiro administrador. A senha deve ter 8+ caracteres; não há senha padrão no código. Contas existentes são mantidas como cadastradas |
 | `COOKIE_SAMESITE` | não | `lax` restringe o cookie de sessão; sem ela, em HTTPS o cookie usa `SameSite=None` para sobreviver em iframes. O token do navegador funciona nos dois casos |
 
 ## 6. Google Drive: do simulado para o real
@@ -230,3 +274,57 @@ A mensagem *"Não foi possível confirmar a origem da requisição"* só aparece
 - Embalagens já usadas não podem ser excluídas nem ter a quantidade alterada — desative e cadastre outra, para não distorcer o estoque produzido.
 - Alterações feitas no Painel Admin (produtos e classificações) não entram no histórico de eventos das bateladas.
 - A exclusão é lógica (soft delete): não apaga dados do banco. Não há lixeira nem restauração pela interface nesta versão.
+
+## Rodapé
+
+Crédito discreto de uma linha, sem faixa ou borda, no fim da tela: **© Vinícius Emanuel**, com link para https://github.com/MrLonely0-0. No painel, o rodapé não sobrepõe cards nem aumenta artificialmente a altura da página.
+
+## Identidade visual · favicon e tela de carregamento
+
+**Admin → Identidade visual** permite importar a arte original em PNG (até 5 MB / 4096 × 4096 pixels). O arquivo original é armazenado **sem reprocessamento**, com SHA-256, no PostgreSQL (`site_branding`). O serviço gera PNGs de 16×16, 32×32 e 180×180 com redimensionamento proporcional e transparência, sem recortar, aplicar filtros ou alterar a composição. Os `<link rel="icon" type="image/png">` são gerados no layout, com versão na URL para invalidar o cache.
+
+A tela de carregamento usa fundo **#000000**, imagem inteira centralizada geometricamente, entrada suave e pulso de escala de 0,985 a 1,025 com opacidade de 0,84 a 1. A saída faz fade de 360 ms. A preferência `prefers-reduced-motion` desliga o pulso e reduz a transição. O PNG original é incorporado ao HTML do splash (data URI) sem reprocessamento, evitando uma requisição separada que poderia receber 204/403. Favicons continuam disponíveis como PNG nas rotas versionadas.
+
+- `SplashProvider`: uma camada global para o carregamento inicial, conferência de sessão e navegação.
+- `usePageLoading`: mantém o splash apenas na primeira consulta de dados de cada tela; o polling do estoque/conversa não o reabre.
+- `SplashLink`: inicia a transição só em navegação interna, não em download, nova aba, Ctrl/Cmd+clique ou link externo.
+- `app/loading.tsx`: fallback nativo para a renderização assíncrona do App Router.
+- O fundo preto só é habilitado depois de o navegador decodificar uma imagem válida. O bitmap é mantido entre as navegações, evitando piscar ou desaparecer na segunda rota.
+- Sem arte, com imagem corrompida ou em erro de decodificação, o conteúdo fica acessível com uma pequena barra de progresso; nunca há uma camada preta vazia.
+- O carregamento inicial espera o DOM e os dados da tela, não o evento global `window.load` de todas as imagens/arquivos.
+- Quando os dados chegam (ou ocorre um erro tratável), a camada desaparece gradualmente e libera o conteúdo. Em demora, é possível continuar sem animação, sem contornar a autenticação.
+- A importação permite selecionar, arrastar ou colar PNG. Depois de salvar, o Admin lê o arquivo de volta do banco e confere o conteúdo; só então mostra "Imagem salva e verificada". O botão **Testar animação** mostra uma prévia por 2,6 segundos, com fade-out, antes ou depois de aplicar.
+
+**Arte pendente neste ambiente:** a imagem foi recebida visualmente na conversa, mas o arquivo binário do anexo não ficou disponível no sandbox. Não foi utilizada uma aproximação gerada por IA nem outra imagem. Enquanto o PNG original não for importado em Admin → Identidade visual, o splash fica desativado (o site permanece acessível) e não é publicado um favicon substituto. Após importar, imagem e favicons são aplicados a todas as páginas automaticamente.
+
+Teste da importação: `npm exec --yes --package=tsx -- tsx scripts/test-branding.ts`. O teste guarda/restaura a configuração anterior, usa uma imagem sintética identificada como teste e remove as contas temporárias; rode em ambiente de teste.
+
+## Contas, perfil pessoal e início da operação real
+
+- **Meu perfil (`/perfil`)**: clique no nome/foto no topo. Foto (JPG, PNG ou WebP, até 5 MB), nome e descrição de até 280 caracteres são opcionais. Deixar o nome ou a nova senha em branco mantém o valor atual. Para trocar a senha, informe a atual e confirme a nova (8+ caracteres). A sessão atual é preservada; outras sessões são encerradas. Fotos são normalizadas para avatar, sem metadados, e servidas somente a usuários autenticados.
+- **Admin → Usuários**: criar, editar nome/**e-mail**/acesso, redefinir senha e **excluir**. E-mails devem ser únicos entre contas não excluídas. A exclusão é lógica: bloqueia login, encerra as sessões e preserva os registros históricos. Não é permitido excluir a própria conta ou retirar o último administrador ativo.
+- **Admin → Perfis de acesso**: excluir perfis personalizados, inclusive os vinculados a usuários, escolhendo um substituto. Perfis padrão do fluxo são fixos. As sessões dos usuários transferidos são encerradas para aplicar o novo acesso.
+- **Relatórios**: consultam os mesmos dados de bateladas, estoque e separações, com atualização a cada 8 segundos e ao retornar à aba. Bateladas excluídas ficam fora dos indicadores normais (podem ser vistas em `Incluir excluídos (auditoria)`). Um item de estoque excluído sai do saldo do relatório. Quantidades históricas de produção e saldo disponível são conceitos distintos; excluir um item não apaga uma produção passada.
+- **Limpar demonstração**: em **Admin → Dados do sistema**, veja a prévia e clique em **Limpar demonstração**; digite **LIMPAR DEMONSTRAÇÃO** para confirmar. São removidos apenas exemplos marcados, com suas caixas, separações de exemplo, eventos e anexos. Produtos, usuários, perfis, conversas, marca/identidade visual, configurações, dados reais e numeração não são zerados. Se movimentos reais dependerem das caixas de exemplo, a limpeza é bloqueada para evitar saldo negativo.
+- Os sete exemplos legados só são identificados por assinaturas conhecidas do seed, sem autoria/eventos de usuários reais. Dados antigos que tenham sido alterados não são classificados como demonstração por suposição.
+- **Ao publicar:** novas instalações têm `DEMO_MODE=off` por padrão e não geram produção fictícia. Se você importar um dump com os exemplos, eles serão importados também; limpe antes de gerar o dump definitivo. A marca de limpeza fica em `app_state` para que os exemplos não voltem após um restart.
+
+Teste não destrutivo: `npm exec --yes --package=tsx -- tsx scripts/test-accounts-data.ts`. O teste usa contas/produtos temporários e valida a limpeza com rollback, sem executar a limpeza definitiva dos exemplos existentes.
+
+## Atualização no GitHub, Banco Neon e Deploy no Render
+
+1. **Banco de dados no Neon (migração sem perda de dados)**
+   - Faça um backup antes (`DATABASE_URL="..." ./scripts/backup.sh`).
+   - Rode a pré-migração idempotente (converte tabelas/colunas legadas de chat, perfis e estoque) e aplique o schema Drizzle:
+     ```bash
+     DATABASE_URL="postgresql://..." npm run db:migrate && DATABASE_URL="postgresql://..." npx drizzle-kit push
+     ```
+2. **Deploy no Render (Web Service)**
+   - **Build Command**: `npm install && npm run build`
+   - **Start Command**: `npm start`
+   - **Health Check Path**: `/api/health`
+   - **Variáveis de ambiente**:
+     - `DATABASE_URL`: string de conexão do Neon (`?sslmode=require`)
+     - `ADMIN_EMAIL` / `ADMIN_PASSWORD` (obrigatórias apenas em banco novo sem usuários; senha com 8+ caracteres)
+     - `DEMO_MODE=off` (recomendado em produção)
+

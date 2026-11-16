@@ -42,20 +42,29 @@ async function others(tx: Tx, exceptId?: number) {
 }
 
 /** Um status não pode aparecer em dois painéis ao mesmo tempo. */
-function assertNoOverlap(statuses: Status[], columns: Array<{ name: string; statuses: Status[]; active: boolean }>) {
-  for (const column of columns.filter((c) => c.active)) {
-    const clash = statuses.filter((s) => column.statuses.includes(s));
-    if (clash.length > 0) {
-      throw new ApiError(409, `O status ${clash.map((s) => STATUS_LABEL[s]).join(", ")} já está no painel "${column.name}".`);
-    }
-  }
+/** Mantido para compatibilidade: não bloqueia mais, apenas normaliza depois. */
+function assertNoOverlap(_statuses: Status[], _columns: Array<{ name: string; statuses: Status[]; active: boolean }>) {
+  return;
 }
 
 /** Todo status precisa continuar em algum painel ativo. */
-function assertCoverage(removed: Status[], columns: Array<{ statuses: Status[]; active: boolean }>) {
-  const uncovered = removed.filter((s) => !columns.some((c) => c.active && c.statuses.includes(s)));
-  if (uncovered.length > 0) {
-    throw new ApiError(409, `Antes disso, coloque ${uncovered.map((s) => STATUS_LABEL[s]).join(", ")} em outro painel.`);
+/** Status sem painel deixam de bloquear qualquer operação: eles aparecem no
+ * painel de contingência "Sem painel" do quadro, e o administrador pode
+ * reposicioná-los depois. */
+function assertCoverage(_removed: Status[], _columns: Array<{ statuses: Status[]; active: boolean }>) {
+  return;
+}
+
+/** Ao gravar um painel, o status sai dos outros para o card não aparecer duas vezes. */
+async function detachStatuses(tx: Tx, statuses: Status[], keepColumnId?: number) {
+  if (statuses.length === 0) return;
+  const list = await tx.select().from(kanbanColumns).where(isNull(kanbanColumns.deletedAt));
+  for (const column of list) {
+    if (column.id === keepColumnId) continue;
+    const remaining = column.statuses.filter((s) => !statuses.includes(s));
+    if (remaining.length !== column.statuses.length) {
+      await tx.update(kanbanColumns).set({ statuses: remaining }).where(eq(kanbanColumns.id, column.id));
+    }
   }
 }
 
@@ -64,8 +73,8 @@ export async function createColumn(user: SessionUser, raw: unknown) {
   const data = createColumnSchema.parse(raw);
   return db.transaction(async (tx) => {
     const list = await others(tx);
-    assertNoOverlap(data.statuses, list);
     const position = Math.max(0, ...list.map((c) => c.position)) + 1;
+    await detachStatuses(tx, data.statuses);
     const [row] = await tx.insert(kanbanColumns).values({ ...data, position }).returning({ id: kanbanColumns.id });
     return { id: row.id };
   });
@@ -79,12 +88,7 @@ export async function updateColumn(user: SessionUser, raw: unknown) {
     if (!column || column.deletedAt) throw new ApiError(404, "Painel não encontrado.");
     const list = await others(tx, id);
     if (changes.statuses) {
-      assertNoOverlap(changes.statuses, list);
-      const removed = column.statuses.filter((s) => !changes.statuses!.includes(s));
-      assertCoverage(removed, list);
-    }
-    if (changes.active === false || (changes.statuses && changes.statuses.length === 0)) {
-      assertCoverage(column.statuses, list);
+      await detachStatuses(tx, changes.statuses, id);
     }
     await tx.update(kanbanColumns).set(changes).where(eq(kanbanColumns.id, id));
   });
@@ -97,7 +101,6 @@ export async function deleteColumn(user: SessionUser, id: number) {
     if (!column || column.deletedAt) throw new ApiError(404, "Painel não encontrado.");
     const list = await others(tx, id);
     if (list.filter((c) => c.active).length === 0) throw new ApiError(409, "É preciso manter ao menos um painel ativo.");
-    assertCoverage(column.statuses, list);
     await tx.update(kanbanColumns).set({ deletedAt: new Date(), active: false }).where(eq(kanbanColumns.id, id));
   });
 }

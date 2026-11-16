@@ -1,10 +1,10 @@
 import { cache } from "react";
 import { cookies, headers } from "next/headers";
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
-import { and, eq, gt, inArray, lt } from "drizzle-orm";
+import { and, eq, gt, inArray, isNull, lt } from "drizzle-orm";
 import { db } from "@/db";
 import { accessProfiles, sessions, users } from "@/db/schema";
-import type { SessionUser } from "@/lib/domain";
+import { avatarUrl, type SessionUser } from "@/lib/domain";
 
 export const SESSION_COOKIE = "tem_session";
 const TTL_SECONDS = 60 * 60 * 12; // um turno
@@ -98,31 +98,18 @@ function bearerToken(h: Headers): string | null {
 export async function getUserByToken(token: string | null): Promise<SessionUser | null> {
   if (!token) return null;
   const [row] = await db
-    .select({
-      id: users.id,
-      name: users.name,
-      email: users.email,
-      role: users.role,
-      profileName: accessProfiles.name,
-      grants: accessProfiles.grants,
-      profileActive: accessProfiles.active,
-    })
+    .select({ id: users.id, name: users.name, email: users.email, role: users.role, profileId: users.profileId, bio: users.bio, avatarVersion: users.avatarVersion })
     .from(sessions)
     .innerJoin(users, eq(users.id, sessions.userId))
-    .leftJoin(accessProfiles, eq(accessProfiles.id, users.profileId))
-    .where(and(eq(sessions.tokenHash, sha256(token)), gt(sessions.expiresAt, new Date()), eq(users.active, true)))
+    .where(and(eq(sessions.tokenHash, sha256(token)), gt(sessions.expiresAt, new Date()), eq(users.active, true), isNull(users.deletedAt)))
     .limit(1);
   if (!row) return null;
-  // Perfil desativado: o usuário mantém apenas o papel-base.
-  const grants = row.profileActive === false ? [] : (row.grants ?? []);
-  return {
-    id: row.id,
-    name: row.name,
-    email: row.email,
-    role: row.role,
-    profileName: row.profileActive === false ? null : row.profileName ?? null,
-    grants: grants as SessionUser["grants"],
-  };
+  if (row.role.startsWith("custom:")) {
+    const [profile] = await db.select().from(accessProfiles).where(eq(accessProfiles.id, row.profileId ?? 0)).limit(1);
+    if (!profile?.active || profile.deletedAt) return null;
+    return { id: row.id, name: row.name, email: row.email, role: row.role, bio: row.bio, avatarUrl: avatarUrl(row.id, row.avatarVersion), profileName: profile.name, permissions: profile.permissions };
+  }
+  return { id: row.id, name: row.name, email: row.email, role: row.role, bio: row.bio, avatarUrl: avatarUrl(row.id, row.avatarVersion) };
 }
 
 /** Usuário da requisição atual (ou null). Memorizado por requisição. */
