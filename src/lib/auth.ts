@@ -3,8 +3,15 @@ import { cookies, headers } from "next/headers";
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { and, eq, gt, inArray, isNull, lt } from "drizzle-orm";
 import { db } from "@/db";
-import { accessProfiles, sessions, users } from "@/db/schema";
-import { avatarUrl, type SessionUser } from "@/lib/domain";
+import { accessProfiles, appState, sessions, users } from "@/db/schema";
+import {
+  ADMIN_CAPABILITIES,
+  avatarUrl,
+  DEFAULT_ADMIN_LIMITS,
+  type AdminCapability,
+  type AdminLimits,
+  type SessionUser,
+} from "@/lib/domain";
 
 export const SESSION_COOKIE = "tem_session";
 const TTL_SECONDS = 60 * 60 * 12; // um turno
@@ -94,9 +101,31 @@ function bearerToken(h: Headers): string | null {
   return scheme?.toLowerCase() === "bearer" && value ? value : null;
 }
 
+export function normalizeAdminLimits(raw: unknown): AdminLimits {
+  if (!raw || typeof raw !== "object" || !Array.isArray((raw as AdminLimits).capabilities)) {
+    return { capabilities: [...DEFAULT_ADMIN_LIMITS.capabilities] };
+  }
+  const allowed = new Set<AdminCapability>(ADMIN_CAPABILITIES);
+  const caps = [...new Set((raw as AdminLimits).capabilities.filter((c): c is AdminCapability => allowed.has(c)))];
+  return { capabilities: caps };
+}
+
+export async function getAdminLimits(): Promise<AdminLimits> {
+  try {
+    const [state] = await db.select({ adminLimits: appState.adminLimits }).from(appState).where(eq(appState.id, "lifecycle")).limit(1);
+    return normalizeAdminLimits(state?.adminLimits);
+  } catch (e) {
+    const code = (e as { code?: string; cause?: { code?: string } } | null)?.cause?.code ?? (e as { code?: string } | null)?.code;
+    if (code === "42703" || code === "42P01") return { capabilities: [...DEFAULT_ADMIN_LIMITS.capabilities] };
+    throw e;
+  }
+}
+
 /** Valida um token (do cabeçalho, da URL ou do cookie) e devolve o usuário. */
 export async function getUserByToken(token: string | null): Promise<SessionUser | null> {
   if (!token) return null;
+  const ready = await (await import("@/lib/seed")).ensureReady();
+  if (!ready.ok) return null;
   const [row] = await db
     .select({ id: users.id, name: users.name, email: users.email, role: users.role, profileId: users.profileId, bio: users.bio, avatarVersion: users.avatarVersion })
     .from(sessions)
@@ -109,12 +138,24 @@ export async function getUserByToken(token: string | null): Promise<SessionUser 
     if (!profile?.active || profile.deletedAt) return null;
     return { id: row.id, name: row.name, email: row.email, role: row.role, bio: row.bio, avatarUrl: avatarUrl(row.id, row.avatarVersion), profileName: profile.name, permissions: profile.permissions };
   }
+  if (row.role === "admin_master") {
+    return { id: row.id, name: row.name, email: row.email, role: row.role, bio: row.bio, avatarUrl: avatarUrl(row.id, row.avatarVersion), adminCapabilities: [...ADMIN_CAPABILITIES] };
+  }
+  if (row.role === "admin") {
+    const limits = await getAdminLimits();
+    return { id: row.id, name: row.name, email: row.email, role: row.role, bio: row.bio, avatarUrl: avatarUrl(row.id, row.avatarVersion), adminCapabilities: limits.capabilities };
+  }
   return { id: row.id, name: row.name, email: row.email, role: row.role, bio: row.bio, avatarUrl: avatarUrl(row.id, row.avatarVersion) };
 }
 
 /** Usuário da requisição atual (ou null). Memorizado por requisição. */
 export const getSessionUser = cache(async (): Promise<SessionUser | null> => {
   const h = await headers();
-  const token = bearerToken(h) ?? (await cookies()).get(SESSION_COOKIE)?.value ?? null;
-  return getUserByToken(token);
+  const bearer = bearerToken(h);
+  const cookie = (await cookies()).get(SESSION_COOKIE)?.value ?? null;
+  for (const token of [...new Set([bearer, cookie].filter((t): t is string => !!t))]) {
+    const user = await getUserByToken(token);
+    if (user) return user;
+  }
+  return null;
 });

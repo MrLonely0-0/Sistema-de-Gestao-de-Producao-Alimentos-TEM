@@ -160,7 +160,7 @@ export function authorizedAssetUrl(path: string): string {
 
 export async function api<T = unknown>(
   url: string,
-  opts: { method?: string; body?: unknown; redirectOn401?: boolean } = {},
+  opts: { method?: string; body?: unknown; redirectOn401?: boolean; signal?: AbortSignal } = {},
 ): Promise<T> {
   const token = getToken();
   let res: Response;
@@ -175,14 +175,18 @@ export async function api<T = unknown>(
       body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
       credentials: "same-origin",
       cache: "no-store",
+      signal: opts.signal,
     });
-  } catch {
+  } catch (err) {
+    if ((err as { name?: string })?.name === "AbortError") {
+      throw new HttpError(408, "Tempo esgotado ao falar com o servidor.");
+    }
     throw new HttpError(0, "Sem conexão com o servidor. Verifique a rede e tente de novo.");
   }
   const data = (await res.json().catch(() => null)) as { error?: string } | null;
   if (res.status === 401) {
     setToken(null);
-    if (opts.redirectOn401 !== false) window.location.href = "/login";
+    if (opts.redirectOn401 !== false) window.location.replace("/login");
   }
   if (!res.ok) {
     throw new HttpError(res.status, data?.error ?? "Não foi possível concluir a operação.");

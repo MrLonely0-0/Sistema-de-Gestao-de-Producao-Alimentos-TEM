@@ -1,10 +1,9 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
-import { useRouter } from "next/navigation";
 import { LoaderCircle, RefreshCw } from "lucide-react";
 import { usePageLoading } from "@/components/splash-provider";
-import type { SessionUser } from "@/lib/domain";
+import { isReadOnly, type SessionUser } from "@/lib/domain";
 import { adoptTokenFromUrl, api, getToken, keepTokenInUrl, setToken } from "@/lib/client";
 import { TopBar } from "@/components/top-bar";
 import { AppFooter } from "@/components/app-footer";
@@ -26,6 +25,10 @@ export function useAuth(): SessionUser {
   return user;
 }
 
+export function useReadOnly(): boolean {
+  return isReadOnly(useAuth().role);
+}
+
 function Splash({ label, children }: { label: string; children?: ReactNode }) {
   return (
     <div className="grid min-h-dvh place-items-center bg-paper px-6">
@@ -41,36 +44,37 @@ function Splash({ label, children }: { label: string; children?: ReactNode }) {
 }
 
 /**
- * Porteiro da aplicação. A sessão é conferida no navegador, com o token que
- * pode vir do armazenamento ou do `#` da URL — assim o sistema abre mesmo
- * quando o navegador bloqueia cookies e armazenamento (iframes, intranet,
- * painel de TV). O servidor valida o token em cada requisição.
+ * Porteiro da aplicação. Valida a sessão tanto por token do navegador
+ * (localStorage/sessionStorage/window.name/#t=) quanto pelo cookie httpOnly
+ * via /api/auth/me — evitando loop de redirecionamento entre `/` e `/login`.
  */
 export function AppGate({ children }: { children: ReactNode }) {
-  const router = useRouter();
   const [user, setUser] = useState<SessionUser | null>(null);
-  const [state, setState] = useState<"checking" | "in" | "offline">("checking");
+  const [state, setState] = useState<"checking" | "in" | "redirecting" | "offline">("checking");
   const [attempt, setAttempt] = useState(0);
   usePageLoading(state === "checking");
 
   useEffect(() => {
     let alive = true;
+    const controller = new AbortController();
     setState("checking");
 
-    // Token que chegou pela URL (quando o armazenamento está bloqueado).
     adoptTokenFromUrl();
+    const hadClientToken = Boolean(getToken());
 
-    if (!getToken()) {
-      setToken(null);
-      router.replace("/login");
-      return;
-    }
+    const timeout = setTimeout(() => {
+      controller.abort();
+      if (alive) setState("offline");
+    }, 25_000);
 
-    const timeout = setTimeout(() => { if (alive) setState("offline"); }, 20_000);
-    api<{ user: SessionUser | null }>("/api/auth/me", { redirectOn401: false })
+    api<{ user: SessionUser | null; clearClientToken?: boolean }>("/api/auth/me", {
+      redirectOn401: false,
+      signal: controller.signal,
+    })
       .then((res) => {
         clearTimeout(timeout);
         if (!alive) return;
+        if (res.clearClientToken) setToken(null);
         if (res.user) {
           setUser(res.user);
           setState("in");
@@ -78,16 +82,17 @@ export function AppGate({ children }: { children: ReactNode }) {
           return;
         }
         setToken(null);
-        router.replace("/login?expired=1");
+        setState("redirecting");
+        window.location.replace(hadClientToken ? "/login?expired=1" : "/login");
       })
       .catch((error: unknown) => {
         clearTimeout(timeout);
         if (!alive) return;
-        // 401 já foi tratado em api(); aqui só resta falha de rede/servidor.
         const status = (error as { status?: number }).status;
         if (status === 401) {
           setToken(null);
-          router.replace("/login?expired=1");
+          setState("redirecting");
+          window.location.replace(hadClientToken ? "/login?expired=1" : "/login");
           return;
         }
         setState("offline");
@@ -96,8 +101,9 @@ export function AppGate({ children }: { children: ReactNode }) {
     return () => {
       alive = false;
       clearTimeout(timeout);
+      controller.abort();
     };
-  }, [router, attempt]);
+  }, [attempt]);
 
   const retry = useCallback(() => setAttempt((n) => n + 1), []);
 

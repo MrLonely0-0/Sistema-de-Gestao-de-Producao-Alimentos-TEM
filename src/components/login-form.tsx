@@ -9,28 +9,42 @@ export function LoginForm({ expired = false }: { expired?: boolean }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
-  const [checkingSession, setCheckingSession] = useState(true);
+  const [checkingSession, setCheckingSession] = useState(false);
   usePageLoading(busy || checkingSession);
   const [error, setError] = useState<string | null>(null);
 
-  // Já autenticado neste navegador? A leitura é assíncrona e cancelável.
+  // Caso o cookie tenha sido bloqueado (ex.: iframe), confere se há token local válido.
   useEffect(() => {
     let alive = true;
-    void Promise.resolve().then(async () => {
-      if (!alive) return;
-      adoptTokenFromUrl();
-      if (!getToken()) { setCheckingSession(false); return; }
-      try {
-        const res = await api<{ user: unknown | null }>("/api/auth/me", { redirectOn401: false });
+    const controller = new AbortController();
+    adoptTokenFromUrl();
+    if (!getToken()) return;
+    setCheckingSession(true);
+    const timer = setTimeout(() => controller.abort(), 10_000);
+    api<{ user: unknown | null; clearClientToken?: boolean }>("/api/auth/me", {
+      redirectOn401: false,
+      signal: controller.signal,
+    })
+      .then((res) => {
         if (!alive) return;
-        if (res.user) window.location.replace("/");
-        else { setToken(null); setCheckingSession(false); }
-      } catch {
+        if (res.clearClientToken) setToken(null);
+        if (res.user) {
+          window.location.replace("/");
+          return;
+        }
+        setToken(null);
+        setCheckingSession(false);
+      })
+      .catch(() => {
         setToken(null);
         if (alive) setCheckingSession(false);
-      }
-    });
-    return () => { alive = false; };
+      })
+      .finally(() => clearTimeout(timer));
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+      controller.abort();
+    };
   }, []);
 
   async function onSubmit(e: FormEvent) {
@@ -51,7 +65,7 @@ export function LoginForm({ expired = false }: { expired?: boolean }) {
         setBusy(false);
         return;
       }
-      window.location.href = persisted ? "/" : `/#t=${encodeURIComponent(res.token)}`;
+      window.location.replace(persisted ? "/" : `/#t=${encodeURIComponent(res.token)}`);
     } catch (err) {
       setError(errMsg(err));
       setBusy(false);

@@ -1,7 +1,15 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { z, ZodError, type ZodType } from "zod";
 import { getUserByToken, SESSION_COOKIE } from "@/lib/auth";
-import type { Role, SessionUser } from "@/lib/domain";
+import {
+  canOpenAdmin,
+  hasAdminCapability,
+  isAnyAdmin,
+  isReadOnly,
+  type AdminCapability,
+  type Role,
+  type SessionUser,
+} from "@/lib/domain";
 
 // Mensagens de validação em português.
 z.config(z.locales.pt());
@@ -95,39 +103,109 @@ export function handle<C = unknown>(fn: (req: NextRequest, ctx: C) => Promise<un
  * `?t=` ou o cookie. Vários proxies removem cabeçalhos desconhecidos, então a
  * URL é o canal mais resistente — por isso ela também é aceita.
  */
-export function requestToken(req: NextRequest | Request): string | null {
+export function requestTokenCandidates(req: NextRequest | Request): {
+  clientToken: string | null;
+  cookieToken: string | null;
+  tokens: string[];
+} {
+  let clientToken: string | null = null;
   const auth = req.headers.get("authorization");
   if (auth?.toLowerCase().startsWith("bearer ")) {
     const value = auth.slice(7).trim();
-    if (value) return value;
+    if (value) clientToken = value;
   }
-  const custom = req.headers.get("x-tem-session");
-  if (custom) return custom;
-  const url = new URL(req.url);
-  const fromQuery = url.searchParams.get("t");
-  if (fromQuery) return fromQuery;
+  if (!clientToken) {
+    const custom = req.headers.get("x-tem-session");
+    if (custom) clientToken = custom;
+  }
+  if (!clientToken) {
+    const url = new URL(req.url);
+    const fromQuery = url.searchParams.get("t");
+    if (fromQuery) clientToken = fromQuery;
+  }
+  let cookieToken: string | null = null;
   if ("cookies" in req && typeof req.cookies.get === "function") {
-    return req.cookies.get(SESSION_COOKIE)?.value ?? null;
+    cookieToken = req.cookies.get(SESSION_COOKIE)?.value ?? null;
+  } else {
+    const rawCookie = req.headers.get("cookie") ?? "";
+    const match = rawCookie.match(/(?:^|;\s*)tem_session=([^;]+)/);
+    cookieToken = match ? decodeURIComponent(match[1]) : null;
   }
-  const rawCookie = req.headers.get("cookie") ?? "";
-  const match = rawCookie.match(/(?:^|;\s*)tem_session=([^;]+)/);
-  return match ? decodeURIComponent(match[1]) : null;
+  const tokens = [...new Set([clientToken, cookieToken].filter((t): t is string => !!t))];
+  return { clientToken, cookieToken, tokens };
 }
 
-/** Exige sessão válida e, se informado, um dos perfis (admin sempre passa). */
+export function requestToken(req: NextRequest | Request): string | null {
+  return requestTokenCandidates(req).tokens[0] ?? null;
+}
+
+export async function resolveSessionFromRequest(req: NextRequest | Request): Promise<{
+  user: SessionUser | null;
+  matchedToken: string | null;
+  clientToken: string | null;
+  cookieToken: string | null;
+}> {
+  const { clientToken, cookieToken, tokens } = requestTokenCandidates(req);
+  for (const token of tokens) {
+    const user = await getUserByToken(token);
+    if (user) return { user, matchedToken: token, clientToken, cookieToken };
+  }
+  return { user: null, matchedToken: null, clientToken, cookieToken };
+}
+
+/** Exige sessão válida e, se informado, um dos perfis (admin_master sempre passa; viewer é somente leitura). */
 export async function requireUser(req: NextRequest, ...roles: Role[]): Promise<SessionUser> {
-  const user = await getUserByToken(requestToken(req));
+  const { user } = await resolveSessionFromRequest(req);
   if (!user) throw new ApiError(401, "Sua sessão expirou. Entre novamente.");
-  if (roles.length > 0 && user.role !== "admin" && !roles.includes(user.role)) {
-    throw new ApiError(403, "Seu perfil não tem permissão para esta ação.");
+  if (req.method !== "GET" && isReadOnly(user.role)) {
+    throw new ApiError(403, "Modo visualização (somente leitura): nenhuma alteração pode ser salva.");
+  }
+  if (roles.length > 0) {
+    const allowed =
+      user.role === "admin_master" ||
+      (user.role === "admin" && hasAdminCapability(user, "operar_fluxo")) ||
+      roles.includes(user.role);
+    if (!allowed) {
+      throw new ApiError(403, "Seu perfil não tem permissão para esta ação.");
+    }
   }
   return user;
 }
 
-export async function requireAdmin(req: NextRequest): Promise<SessionUser> {
-  const user = await getUserByToken(requestToken(req));
+export async function requireAdmin(req: NextRequest, capability?: AdminCapability): Promise<SessionUser> {
+  const { user } = await resolveSessionFromRequest(req);
   if (!user) throw new ApiError(401, "Sua sessão expirou. Entre novamente.");
-  if (user.role !== "admin") throw new ApiError(403, "Apenas administradores podem acessar esta área.");
+  if (req.method !== "GET" && isReadOnly(user.role)) {
+    throw new ApiError(403, "Modo visualização (somente leitura): alterações não são permitidas.");
+  }
+  if (!isAnyAdmin(user.role)) throw new ApiError(403, "Apenas administradores podem acessar esta área.");
+  if (capability && !hasAdminCapability(user, capability)) {
+    throw new ApiError(403, "Seu perfil de administrador não tem permissão para esta área.");
+  }
+  return user;
+}
+
+/** Leitura no Admin: liberada para administradores (conforme limites) e perfil Visualização (somente leitura). */
+export async function requireAdminRead(req: NextRequest, capability?: AdminCapability): Promise<SessionUser> {
+  const { user } = await resolveSessionFromRequest(req);
+  if (!user) throw new ApiError(401, "Sua sessão expirou. Entre novamente.");
+  if (isReadOnly(user.role)) return user;
+  if (!isAnyAdmin(user.role)) throw new ApiError(403, "Apenas administradores podem acessar esta área.");
+  if (capability && !hasAdminCapability(user, capability)) {
+    throw new ApiError(403, "Seu perfil de administrador não tem permissão para visualizar esta área.");
+  }
+  if (!capability && !canOpenAdmin(user)) {
+    throw new ApiError(403, "Seu perfil de administrador está sem permissões no Painel Admin.");
+  }
+  return user;
+}
+
+export async function requireMasterAdmin(req: NextRequest): Promise<SessionUser> {
+  const { user } = await resolveSessionFromRequest(req);
+  if (!user) throw new ApiError(401, "Sua sessão expirou. Entre novamente.");
+  if (user.role !== "admin_master") {
+    throw new ApiError(403, "Apenas o Administrador Master pode executar esta ação.");
+  }
   return user;
 }
 
