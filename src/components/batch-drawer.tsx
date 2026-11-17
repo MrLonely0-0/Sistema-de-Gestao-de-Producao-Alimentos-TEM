@@ -5,15 +5,19 @@ import { ExternalLink, FileText, FolderOpen, Image as ImageIcon, Lock, ShieldAle
 import {
   can,
   canAttach,
+  hasAdminCapability,
+  isReadOnly,
+  missingForFinish,
   missingForReady,
-  PROCESS_STEPS,
   ROLE_LABEL,
   roleLabel,
   STAGE_META,
   STAGE_OF,
+  stepsForStatus,
   type AttachmentKind,
   type BatchDetailDTO,
   type Action,
+  type AdminCapability,
   type BatchDTO,
   type ColumnFeature,
   type Role,
@@ -31,29 +35,36 @@ interface FooterAction {
   disabled?: boolean;
 }
 
-function actionsFor(b: BatchDTO, role: Role, features: ColumnFeature[] = [], permissions: readonly Action[] = []): FooterAction[] {
+function actionsFor(
+  b: BatchDTO,
+  role: Role,
+  features: ColumnFeature[] = [],
+  permissions: readonly Action[] = [],
+  adminCapabilities?: readonly AdminCapability[],
+): FooterAction[] {
   const on = (feature: ColumnFeature) => features.length === 0 || features.includes(feature);
-  if (b.status === "em_preparo" && can(role, "editar", permissions) && on("editar")) {
+  const viewer = isReadOnly(role);
+  if (b.status === "em_preparo" && (viewer || (can(role, "editar", permissions, adminCapabilities) && on("editar")))) {
     return [
-      { action: "edit", label: "Editar dados", variant: "outline" },
-      { action: "marcar_pronto", label: "Marcar como Pronto", variant: "primary", disabled: missingForReady(b).length > 0 },
+      { action: "edit", label: viewer ? "Visualizar edição" : "Editar dados", variant: "outline" },
+      { action: "marcar_pronto", label: "Marcar como Pronto", variant: "primary", disabled: viewer || missingForReady(b).length > 0 },
     ];
   }
-  if (b.status === "pronto" && can(role, "liberar", permissions)) {
+  if (b.status === "pronto" && (viewer || (can(role, "liberar", permissions, adminCapabilities) && on("liberar")))) {
     return [
       { action: "devolver", label: "Devolver", variant: "ghost" },
       { action: "reter", label: "Reter", variant: "outline-danger" },
       { action: "liberar", label: "Liberar lote", variant: "ok" },
     ];
   }
-  if (b.status === "retido" && can(role, "liberar", permissions)) {
+  if (b.status === "retido" && (viewer || (can(role, "liberar", permissions, adminCapabilities) && on("liberar")))) {
     return [
       { action: "devolver", label: "Devolver à Produção", variant: "ghost" },
       { action: "liberar", label: "Liberar lote", variant: "ok" },
     ];
   }
-  if (b.status === "liberado" && can(role, "finalizar", permissions) && on("finalizar")) {
-    return [{ action: "finalizar", label: "Definir caixas e finalizar", variant: "primary" }];
+  if (b.status === "liberado" && (viewer || (can(role, "finalizar", permissions, adminCapabilities) && on("finalizar")))) {
+    return [{ action: "finalizar", label: viewer ? "Visualizar caixas e acabamento" : "Definir caixas e finalizar", variant: "primary" }];
   }
   return [];
 }
@@ -144,10 +155,14 @@ export function BatchDrawer({
     }
   }
 
-  const actions = detail ? actionsFor(detail, user.role, features, permissions) : [];
+  const readOnly = isReadOnly(user.role);
+  const canDeleteBatch = !readOnly && hasAdminCapability(user, "excluir_bateladas") && canDelete;
+  const actions = detail ? actionsFor(detail, user.role, features, permissions, user.adminCapabilities) : [];
   const myLastEvent = detail?.events.find((e) => e.userId === user.id);
   const stage = detail ? STAGE_OF[detail.status] : null;
   const missing = detail && detail.status === "em_preparo" ? missingForReady(detail) : [];
+  const missingFinish = detail && detail.status === "liberado" ? missingForFinish(detail) : [];
+  const visibleSteps = detail ? stepsForStatus(detail.status) : [];
   const usedUnits = detail ? detail.outputs.reduce((acc, o) => acc + o.boxes * o.unitsPerBox, 0) : 0;
   const good = detail?.goodUnits ?? 0;
   const loss = detail?.lossUnits ?? 0;
@@ -161,9 +176,9 @@ export function BatchDrawer({
       onClose={onClose}
       footer={
         detail &&
-        (actions.length > 0 || (user.role === "admin" && canDelete) ? (
+        (actions.length > 0 || canDeleteBatch ? (
           <>
-            {user.role === "admin" && canDelete && (
+            {canDeleteBatch && (
               <Button
                 variant="outline-danger"
                 className="mr-auto"
@@ -312,7 +327,7 @@ export function BatchDrawer({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-line">
-                  {PROCESS_STEPS.map((step) => {
+                  {visibleSteps.map((step) => {
                     const start = detail[step.start];
                     const end = detail[step.end];
                     return (
@@ -329,6 +344,11 @@ export function BatchDrawer({
                 </tbody>
               </table>
             </div>
+            {missingFinish.length > 0 && (
+              <p className="mt-2 text-xs text-acab">
+                <span className="font-bold">Falta para finalizar o acabamento:</span> {missingFinish.join(", ").toLowerCase()}.
+              </p>
+            )}
           </section>
 
           {detail.outputs.length > 0 && (
@@ -412,7 +432,7 @@ export function BatchDrawer({
                           {a.kind === "laudo" ? "Laudo" : "Foto"} · {a.createdByName} · {fmtShort(a.createdAt)}
                         </p>
                       </div>
-                      {(user.role === "admin" || a.createdById === user.id) && (
+                      {!readOnly && (hasAdminCapability(user, "excluir_bateladas") || a.createdById === user.id) && (
                         <button
                           type="button"
                           onClick={() => void removeAttachment(a.id, a.name)}
@@ -429,9 +449,10 @@ export function BatchDrawer({
                 <p className="border-t border-line px-3 py-3 text-[13px] text-ink-3">Nenhum laudo ou foto anexado ainda.</p>
               )}
 
-              {canAttach(user.role, detail.status, permissions) && (features.length === 0 || features.includes("anexar")) && (
+              {(readOnly || canAttach(user.role, detail.status, permissions, user.adminCapabilities)) && (features.length === 0 || features.includes("anexar")) && (
                 <AttachForm
                   batchId={detail.id}
+                  readOnly={readOnly}
                   onAdded={async () => {
                     await load();
                     onChanged();
@@ -496,7 +517,7 @@ export function BatchDrawer({
   );
 }
 
-function AttachForm({ batchId, onAdded }: { batchId: number; onAdded: () => Promise<void> }) {
+function AttachForm({ batchId, readOnly = false, onAdded }: { batchId: number; readOnly?: boolean; onAdded: () => Promise<void> }) {
   const toast = useToast();
   const [kind, setKind] = useState<AttachmentKind>("laudo");
   const [name, setName] = useState("");
@@ -506,6 +527,7 @@ function AttachForm({ batchId, onAdded }: { batchId: number; onAdded: () => Prom
 
   async function submit(e: FormEvent) {
     e.preventDefault();
+    if (readOnly) return;
     setBusy(true);
     setError(null);
     try {
@@ -559,7 +581,7 @@ function AttachForm({ batchId, onAdded }: { batchId: number; onAdded: () => Prom
         />
       </div>
       <ErrorNote>{error}</ErrorNote>
-      <Button type="submit" size="sm" variant="outline" loading={busy} disabled={name.trim().length < 2 || url.trim().length < 8}>
+      <Button type="submit" size="sm" variant="outline" loading={busy} disabled={readOnly || name.trim().length < 2 || url.trim().length < 8}>
         Guardar na pasta
       </Button>
     </form>

@@ -8,8 +8,12 @@ import {
   ACTION_LABEL,
   can,
   featureOn,
+  isAnyAdmin,
+  isReadOnly,
   missingForReady,
   ROLE_LABEL,
+  userCan,
+  type AdminCapability,
   type BatchDTO,
   type BoardDTO,
   type ColumnDTO,
@@ -51,9 +55,20 @@ const NEXT: Record<Status, Array<{ action: DropIntent; to: Status }>> = {
   em_estoque: [],
 };
 
-function dropIntent(batch: BatchDTO, target: ColumnDTO, role: Role, columns: ColumnDTO[], permissions: readonly import("@/lib/domain").Action[] = []): DropIntent | null {
+function dropIntent(
+  batch: BatchDTO,
+  target: ColumnDTO,
+  role: Role,
+  columns: ColumnDTO[],
+  permissions: readonly import("@/lib/domain").Action[] = [],
+  adminCapabilities?: readonly AdminCapability[],
+): DropIntent | null {
+  if (isReadOnly(role)) return null;
   const hit = NEXT[batch.status].find(
-    (x) => target.statuses.includes(x.to) && can(role, x.action, permissions) && featureOn(columns, x.action, batch.status),
+    (x) =>
+      target.statuses.includes(x.to) &&
+      can(role, x.action, permissions, adminCapabilities) &&
+      featureOn(columns, x.action, batch.status),
   );
   return hit?.action ?? null;
 }
@@ -188,8 +203,9 @@ export function Board({ user }: { user: SessionUser }) {
 
   const openBatch = openId !== null ? board?.batches.find((b) => b.id === openId) : undefined;
   const openColumn = openBatch ? columns.find((c) => c.statuses.includes(openBatch.status)) : undefined;
-  const canCreate = can(user.role, "criar", user.permissions) && featureOn(columns, "criar", "em_preparo");
-  const canShip = can(user.role, "separar", user.permissions) && featureOn(columns, "separar");
+  const readOnly = isReadOnly(user.role);
+  const canCreate = (readOnly || userCan(user, "criar")) && featureOn(columns, "criar", "em_preparo");
+  const canShip = (readOnly || userCan(user, "separar")) && featureOn(columns, "separar");
 
   return (
     <div className="flex h-full flex-col">
@@ -268,7 +284,7 @@ export function Board({ user }: { user: SessionUser }) {
         {renderColumns.map((column, index) => {
           const style = ACCENT_STYLE[column.accent] ?? ACCENT_STYLE.ink;
           const items = column.id === -1 ? grouped.orphans : grouped.map.get(column.id) ?? [];
-          const intent = drag ? dropIntent(drag, column, user.role, columns, user.permissions) : null;
+          const intent = drag ? dropIntent(drag, column, user.role, columns, user.permissions, user.adminCapabilities) : null;
           const mine = user.role === column.role;
           const isStock = column.statuses.includes("em_estoque");
           const count = isStock && board && !filtering ? board.stockedTotal : items.length;
@@ -341,7 +357,8 @@ export function Board({ user }: { user: SessionUser }) {
                       role={user.role}
                       features={column.features}
                       permissions={user.permissions}
-                      draggable={renderColumns.some((c) => c.id !== -1 && dropIntent(b, c, user.role, columns, user.permissions) !== null)}
+                      adminCapabilities={user.adminCapabilities}
+                      draggable={!readOnly && renderColumns.some((c) => c.id !== -1 && dropIntent(b, c, user.role, columns, user.permissions, user.adminCapabilities) !== null)}
                       dragging={drag?.id === b.id}
                       onOpen={() => setOpenId(b.id)}
                       onCta={(kind) => {
@@ -368,7 +385,7 @@ export function Board({ user }: { user: SessionUser }) {
                         Abrir nova batelada
                       </Button>
                     )}
-                    {!mine && user.role !== "admin" && !filtering && column.id !== -1 && (
+                    {!mine && !isAnyAdmin(user.role) && !readOnly && !filtering && column.id !== -1 && (
                       <p className="mt-1 text-xs text-ink-3">Etapa de: {ROLE_LABEL[column.role]}</p>
                     )}
                   </div>
@@ -404,21 +421,23 @@ export function Board({ user }: { user: SessionUser }) {
           products={board.products}
           dimensions={board.dimensions}
           allowMultiFormatBatch={board.allowMultiFormatBatch}
+          readOnly={readOnly}
           onClose={() => setDialog(null)}
           onDone={done}
         />
       )}
-      {dialog?.type === "release" && <ReleaseDialog batch={dialog.batch} onClose={() => setDialog(null)} onDone={done} />}
-      {dialog?.type === "reason" && <ReasonDialog batch={dialog.batch} action={dialog.action} onClose={() => setDialog(null)} onDone={done} />}
+      {dialog?.type === "release" && <ReleaseDialog batch={dialog.batch} readOnly={readOnly} onClose={() => setDialog(null)} onDone={done} />}
+      {dialog?.type === "reason" && <ReasonDialog batch={dialog.batch} action={dialog.action} readOnly={readOnly} onClose={() => setDialog(null)} onDone={done} />}
       {dialog?.type === "finish" && board && (
         <FinishDialog
           batch={dialog.batch}
           products={board.products.filter((p) => dialog.batch.productIds.includes(p.id))}
+          readOnly={readOnly}
           onClose={() => setDialog(null)}
           onDone={done}
         />
       )}
-      {dialog?.type === "ship" && board && <ShipDialog stock={board.stock} onClose={() => setDialog(null)} onDone={done} />}
+      {dialog?.type === "ship" && board && <ShipDialog stock={board.stock} readOnly={readOnly} onClose={() => setDialog(null)} onDone={done} />}
     </div>
   );
 }

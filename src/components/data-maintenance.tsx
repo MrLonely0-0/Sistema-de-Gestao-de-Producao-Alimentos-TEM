@@ -4,9 +4,11 @@ import { useCallback, useEffect, useState } from "react";
 import { CheckCircle2, Database, RefreshCw, ShieldCheck, Trash2, TriangleAlert } from "lucide-react";
 import type { DataMaintenanceDTO } from "@/lib/domain";
 import { api, errMsg, fmtDateTime, fmtInt } from "@/lib/client";
+import { useReadOnly } from "@/components/auth-provider";
 import { Button, ErrorNote, Field, inputCls, Modal, PanelCard, SectionTitle, StatusPill, useToast } from "@/components/ui";
 
 export function DataMaintenance({ onChanged }: { onChanged: () => Promise<void> }) {
+  const readOnly = useReadOnly();
   const toast = useToast();
   const [data, setData] = useState<DataMaintenanceDTO | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -19,7 +21,7 @@ export function DataMaintenance({ onChanged }: { onChanged: () => Promise<void> 
   }, []);
   useEffect(() => { void load(); }, [load]);
   async function clear() {
-    if (!data) return;
+    if (!data || readOnly) return;
     setBusy(true); setError(null);
     try {
       const result = await api<{ removedBatches: number; removedShipments: number }>("/api/admin/data", { method: "POST", body: { confirmation, version: data.version } });
@@ -51,9 +53,9 @@ export function DataMaintenance({ onChanged }: { onChanged: () => Promise<void> 
     </section>}
     {data?.blockers.map((b) => <p key={b} role="alert" className="flex items-start gap-2 rounded-lg bg-prod-soft p-3 text-sm text-prod"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{b}</p>)}
     <ErrorNote>{!open && error}</ErrorNote>
-    <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-stop/25 bg-card p-4"><p className="max-w-xl text-xs leading-relaxed text-ink-2">A limpeza é definitiva e remove somente os registros marcados como demonstração, com suas caixas, eventos e anexos. Os saldos são recalculados na mesma operação; nenhuma quantidade pode ficar negativa.</p><Button variant="outline-danger" disabled={!data || count === 0 || !!data.blockers.length || busy} icon={<Trash2 aria-hidden className="size-4" />} onClick={() => { setError(null); setConfirmation(""); setOpen(true); }}>Limpar demonstração</Button></div>
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-stop/25 bg-card p-4"><p className="max-w-xl text-xs leading-relaxed text-ink-2">A limpeza é definitiva e remove somente os registros marcados como demonstração, com suas caixas, eventos e anexos. Os saldos são recalculados na mesma operação; nenhuma quantidade pode ficar negativa.</p><Button variant="outline-danger" disabled={readOnly || !data || count === 0 || !!data.blockers.length || busy} icon={<Trash2 aria-hidden className="size-4" />} onClick={() => { setError(null); setConfirmation(""); setOpen(true); }}>Limpar demonstração</Button></div>
     {open && data && <Modal eyebrow="Admin · dados do sistema" title="Limpar dados de demonstração?" onClose={() => { if (!busy) setOpen(false); }} width="max-w-lg"
-      footer={<><Button variant="ghost" onClick={() => setOpen(false)} disabled={busy}>Cancelar</Button><Button variant="danger" loading={busy} disabled={confirmation !== "LIMPAR DEMONSTRAÇÃO"} onClick={() => void clear()}>Confirmar limpeza</Button></>}>
+      footer={<><Button variant="ghost" onClick={() => setOpen(false)} disabled={busy}>Cancelar</Button><Button variant="danger" loading={busy} disabled={readOnly || confirmation !== "LIMPAR DEMONSTRAÇÃO"} onClick={() => void clear()}>Confirmar limpeza</Button></>}>
       <div className="space-y-4"><p className="text-sm leading-relaxed text-ink-2">Serão removidas <strong>{data.demoBatches} batelada(s) de exemplo</strong> e <strong>{data.demoShipments} separação(ões) de exemplo</strong>. Seus cadastros e dados reais serão mantidos.</p><Field label="Digite LIMPAR DEMONSTRAÇÃO para confirmar"><input className={inputCls} value={confirmation} onChange={(e) => setConfirmation(e.target.value)} autoComplete="off" spellCheck={false} /></Field><ErrorNote>{error}</ErrorNote></div>
     </Modal>}
   </div>;

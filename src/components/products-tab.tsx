@@ -33,9 +33,11 @@ function SmallCard({ children, className }: { children: ReactNode; className?: s
 
 export function MultiFormatSettingCard({
   allowMultiFormatBatch,
+  readOnly = false,
   run,
 }: {
   allowMultiFormatBatch: boolean;
+  readOnly?: boolean;
   run: Run;
 }) {
   return (
@@ -49,6 +51,7 @@ export function MultiFormatSettingCard({
       </div>
       <Switch
         checked={allowMultiFormatBatch}
+        disabled={readOnly}
         onChange={(next) =>
           void run(
             () => api("/api/admin/settings", { method: "PATCH", body: { allowMultiFormatBatch: next } }),
@@ -67,11 +70,13 @@ export function ProductsTab({
   products,
   dimensions,
   allowMultiFormatBatch,
+  readOnly = false,
   run,
 }: {
   products: ProductDTO[];
   dimensions: DimensionDTO[];
   allowMultiFormatBatch: boolean;
+  readOnly?: boolean;
   run: Run;
 }) {
   const toast = useToast();
@@ -136,7 +141,7 @@ export function ProductsTab({
 
   return (
     <div className="space-y-6">
-      <MultiFormatSettingCard allowMultiFormatBatch={allowMultiFormatBatch} run={run} />
+      <MultiFormatSettingCard allowMultiFormatBatch={allowMultiFormatBatch} readOnly={readOnly} run={run} />
 
       {/* ── Tipos de separação (dimensões) ── */}
       <section>
@@ -219,6 +224,7 @@ export function ProductsTab({
                 </Button>
                 <Switch
                   checked={d.active}
+                  disabled={readOnly}
                   label={`Separação ${d.name} ativa`}
                   onChange={(active) => void run(() => api("/api/admin/dimensions", { method: "PATCH", body: { id: d.id, active } }))}
                 />
@@ -366,6 +372,7 @@ export function ProductsTab({
                 product={p}
                 dimensions={activeDimensions}
                 valueName={valueName}
+                readOnly={readOnly}
                 run={run}
                 selected={selected.includes(p.id)}
                 onToggleSelected={() => toggleSelected(p.id)}
@@ -394,6 +401,7 @@ export function ProductsTab({
           title="Novo tipo de separação"
           label="Nome da separação"
           placeholder="Ex.: Linha, Segmento, Categoria"
+          readOnly={readOnly}
           busy={busy}
           error={dialogError}
           onClose={() => setDialog(null)}
@@ -405,6 +413,7 @@ export function ProductsTab({
           title={`Editar "${dialog.dimension.name}"`}
           label="Nome da separação"
           initial={dialog.dimension.name}
+          readOnly={readOnly}
           busy={busy}
           error={dialogError}
           onClose={() => setDialog(null)}
@@ -417,6 +426,7 @@ export function ProductsTab({
         <ValueDialog
           dimension={dimensions.find((d) => d.id === dialog.dimensionId)!}
           value={dialog.value}
+          readOnly={readOnly}
           busy={busy}
           error={dialogError}
           onClose={() => setDialog(null)}
@@ -434,6 +444,7 @@ export function ProductsTab({
           product={dialog.product}
           dimensions={activeDimensions}
           brandDimension={brandDim}
+          readOnly={readOnly}
           busy={busy}
           error={dialogError}
           onClose={() => setDialog(null)}
@@ -449,6 +460,7 @@ export function ProductsTab({
         <BulkDialog
           count={selectedVisible.length}
           dimensions={activeDimensions}
+          readOnly={readOnly}
           busy={busy}
           error={dialogError}
           onClose={() => setDialog(null)}
@@ -471,12 +483,13 @@ export function ProductsTab({
               <Button variant="ghost" onClick={() => setDialog(null)} disabled={busy}>
                 Cancelar
               </Button>
-              <Button variant="danger" loading={busy} onClick={() => void submit(dialog.action, dialog.ok)}>
+              <Button variant="danger" loading={busy} disabled={readOnly} onClick={() => void submit(dialog.action, dialog.ok)}>
                 {dialog.confirmLabel}
               </Button>
             </>
           }
         >
+          {readOnly && <p className="mb-3 rounded-lg bg-qual-soft px-3 py-2 text-xs font-medium text-qual">Modo visualização (somente leitura): a exclusão está desabilitada.</p>}
           <p className="text-sm leading-relaxed text-ink-2">{dialog.body}</p>
           <ErrorNote>{dialogError}</ErrorNote>
         </Modal>
@@ -499,6 +512,7 @@ function ProductCard({
   product,
   dimensions,
   valueName,
+  readOnly,
   run,
   selected,
   onToggleSelected,
@@ -508,6 +522,7 @@ function ProductCard({
   product: ProductDTO;
   dimensions: DimensionDTO[];
   valueName: (dimensionId: number, valueId: number | null) => string | null;
+  readOnly: boolean;
   run: Run;
   selected: boolean;
   onToggleSelected: () => void;
@@ -563,6 +578,7 @@ function ProductCard({
       <div className="mt-2 flex justify-end">
         <Switch
           checked={product.active}
+          disabled={readOnly}
           label={`Produto ${title} ativo`}
           onChange={(active) =>
             void run(
@@ -583,14 +599,16 @@ function ProductCard({
             return (
               <li key={o.id} className="flex items-center gap-2 py-1 pl-3 pr-1">
                 <span className={cn("min-w-0 flex-1 truncate text-sm font-semibold", !o.active && "text-ink-3 line-through")}>{name}</span>
-                <Switch checked={o.active} label={`Embalagem ${name} de ${title} ativa`} onChange={(active) => void run(() => api("/api/admin/packaging", { method: "PATCH", body: { id: o.id, active } }))} />
-                <IconButton
-                  label={`Excluir embalagem ${name}`}
-                  icon={<Trash2 />}
-                  onClick={() =>
-                    void run(() => api(`/api/admin/packaging?id=${o.id}`, { method: "DELETE" }), `${name} removida de ${title}.`)
-                  }
-                />
+                <Switch checked={o.active} disabled={readOnly} label={`Embalagem ${name} de ${title} ativa`} onChange={(active) => void run(() => api("/api/admin/packaging", { method: "PATCH", body: { id: o.id, active } }))} />
+                {!readOnly && (
+                  <IconButton
+                    label={`Excluir embalagem ${name}`}
+                    icon={<Trash2 />}
+                    onClick={() =>
+                      void run(() => api(`/api/admin/packaging?id=${o.id}`, { method: "DELETE" }), `${name} removida de ${title}.`)
+                    }
+                  />
+                )}
               </li>
             );
           })}
@@ -616,7 +634,7 @@ function ProductCard({
           onChange={(e) => setUnits(e.target.value.replace(/\D/g, "").slice(0, 4))}
         />
         <span className="text-sm text-ink-3">un</span>
-        <Button type="submit" variant="outline" className="ml-auto" loading={busy} disabled={!units || Number(units) < 1}>
+        <Button type="submit" variant="outline" className="ml-auto" loading={busy} disabled={readOnly || !units || Number(units) < 1}>
           Vincular
         </Button>
       </form>
@@ -631,6 +649,7 @@ function NameDialog({
   label,
   placeholder,
   initial = "",
+  readOnly,
   busy,
   error,
   onClose,
@@ -640,6 +659,7 @@ function NameDialog({
   label: string;
   placeholder?: string;
   initial?: string;
+  readOnly: boolean;
   busy: boolean;
   error: string | null;
   onClose: () => void;
@@ -657,13 +677,14 @@ function NameDialog({
           <Button variant="ghost" onClick={onClose} disabled={busy}>
             Cancelar
           </Button>
-          <Button type="submit" form="name-form" loading={busy} disabled={!name.trim()}>
+          <Button type="submit" form="name-form" loading={busy} disabled={readOnly || !name.trim()}>
             Salvar
           </Button>
         </>
       }
     >
-      <form id="name-form" onSubmit={(e) => { e.preventDefault(); onSubmit(name.trim()); }} className="space-y-3">
+      <form id="name-form" onSubmit={(e) => { e.preventDefault(); if (!readOnly) onSubmit(name.trim()); }} className="space-y-3">
+        {readOnly && <p className="rounded-lg bg-qual-soft px-3 py-2 text-xs font-medium text-qual">Modo visualização (somente leitura): alterações não podem ser salvas.</p>}
         <Field label={label}>
           <input className={inputCls} autoFocus value={name} maxLength={40} placeholder={placeholder} onChange={(e) => setName(e.target.value)} />
         </Field>
@@ -676,6 +697,7 @@ function NameDialog({
 function ValueDialog({
   dimension,
   value,
+  readOnly,
   busy,
   error,
   onClose,
@@ -683,6 +705,7 @@ function ValueDialog({
 }: {
   dimension: DimensionDTO;
   value?: DimensionValueDTO;
+  readOnly: boolean;
   busy: boolean;
   error: string | null;
   onClose: () => void;
@@ -701,13 +724,14 @@ function ValueDialog({
           <Button variant="ghost" onClick={onClose} disabled={busy}>
             Cancelar
           </Button>
-          <Button type="submit" form="value-form" loading={busy} disabled={!name.trim()}>
+          <Button type="submit" form="value-form" loading={busy} disabled={readOnly || !name.trim()}>
             Salvar
           </Button>
         </>
       }
     >
-      <form id="value-form" onSubmit={(e) => { e.preventDefault(); onSubmit(name.trim(), active); }} className="space-y-3">
+      <form id="value-form" onSubmit={(e) => { e.preventDefault(); if (!readOnly) onSubmit(name.trim(), active); }} className="space-y-3">
+        {readOnly && <p className="rounded-lg bg-qual-soft px-3 py-2 text-xs font-medium text-qual">Modo visualização (somente leitura): alterações não podem ser salvas.</p>}
         <Field label={`Nome do valor de ${dimension.name}`} hint={dimension.isBrand ? "Renomear uma marca atualiza também as bateladas já registradas." : undefined}>
           <input className={inputCls} autoFocus value={name} maxLength={40} placeholder="Ex.: Alho triturado" onChange={(e) => setName(e.target.value)} />
         </Field>
@@ -716,7 +740,7 @@ function ValueDialog({
             Este valor está em {value.productCount} produto(s). Ao renomear, a etiqueta e o histórico serão atualizados.
           </p>
         )}
-        {value && <Switch checked={active} label="Valor ativo" onChange={setActive} />}
+        {value && <Switch checked={active} disabled={readOnly} label="Valor ativo" onChange={setActive} />}
         <ErrorNote>{error}</ErrorNote>
       </form>
     </Modal>
@@ -727,6 +751,7 @@ function ProductFormDialog({
   product,
   dimensions,
   brandDimension,
+  readOnly,
   busy,
   error,
   onClose,
@@ -735,6 +760,7 @@ function ProductFormDialog({
   product?: ProductDTO;
   dimensions: DimensionDTO[];
   brandDimension?: DimensionDTO;
+  readOnly: boolean;
   busy: boolean;
   error: string | null;
   onClose: () => void;
@@ -759,6 +785,7 @@ function ProductFormDialog({
 
   function submit(e: FormEvent) {
     e.preventDefault();
+    if (readOnly) return;
     const classifications = dimensions
       .filter((d) => selected[d.id])
       .map((d) => ({ dimensionId: d.id, valueId: Number(selected[d.id]) }));
@@ -784,13 +811,14 @@ function ProductFormDialog({
           <Button variant="ghost" onClick={onClose} disabled={busy}>
             Cancelar
           </Button>
-          <Button type="submit" form="product-form" loading={busy} disabled={!format.trim()}>
+          <Button type="submit" form="product-form" loading={busy} disabled={readOnly || !format.trim()}>
             {product ? "Salvar alterações" : "Cadastrar"}
           </Button>
         </>
       }
     >
       <form id="product-form" onSubmit={submit} className="space-y-4">
+        {readOnly && <p className="rounded-lg bg-qual-soft px-3 py-2 text-xs font-medium text-qual">Modo visualização (somente leitura): alterações não podem ser salvas.</p>}
         <div className="grid gap-3 sm:grid-cols-2">
           {dimensions.map((d) => (
             <Field
@@ -839,6 +867,7 @@ function ProductFormDialog({
 function BulkDialog({
   count,
   dimensions,
+  readOnly,
   busy,
   error,
   onClose,
@@ -846,6 +875,7 @@ function BulkDialog({
 }: {
   count: number;
   dimensions: DimensionDTO[];
+  readOnly: boolean;
   busy: boolean;
   error: string | null;
   onClose: () => void;
@@ -855,6 +885,7 @@ function BulkDialog({
 
   function submit(e: FormEvent) {
     e.preventDefault();
+    if (readOnly) return;
     const classifications = Object.entries(choices)
       .filter(([, value]) => value !== "")
       .map(([dimensionId, value]) => ({
@@ -876,13 +907,14 @@ function BulkDialog({
           <Button variant="ghost" onClick={onClose} disabled={busy}>
             Cancelar
           </Button>
-          <Button type="submit" form="bulk-form" loading={busy} disabled={!Object.values(choices).some((v) => v !== "")}>
+          <Button type="submit" form="bulk-form" loading={busy} disabled={readOnly || !Object.values(choices).some((v) => v !== "")}>
             Aplicar a {count} produto(s)
           </Button>
         </>
       }
     >
       <form id="bulk-form" onSubmit={submit} className="space-y-4">
+        {readOnly && <p className="rounded-lg bg-qual-soft px-3 py-2 text-xs font-medium text-qual">Modo visualização (somente leitura): alterações em massa estão desabilitadas.</p>}
         <p className="text-sm leading-relaxed text-ink-2">
           Escolha o novo valor para marca, família, grupo ou qualquer outra separação. Deixe <strong>Manter como está</strong> nas
           classificações que não devem mudar. Trocar a marca atualiza também as bateladas antigas desses produtos.

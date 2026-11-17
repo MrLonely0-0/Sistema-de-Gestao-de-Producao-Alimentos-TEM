@@ -7,10 +7,11 @@ import { fmtInt, packLabel } from "@/lib/client";
 import { Button, cn, ErrorNote, Field, inputCls, Modal } from "@/components/ui";
 
 export function InventoryItemDialog({
-  item, data, busy, error, onClose, onSave,
+  item, data, readOnly = false, busy, error, onClose, onSave,
 }: {
   item?: InventoryRowDTO;
   data: StockManageDTO;
+  readOnly?: boolean;
   busy: boolean;
   error: string | null;
   onClose: () => void;
@@ -33,7 +34,7 @@ export function InventoryItemDialog({
 
   function submit(e: FormEvent) {
     e.preventDefault();
-    if (!valid) return;
+    if (readOnly || !valid) return;
     const common = { name, location, notes, balance: Number(balance) };
     onSave(item
       ? { ...common, id: item.id, revision: item.revision, reason }
@@ -48,12 +49,13 @@ export function InventoryItemDialog({
       width="max-w-xl"
       footer={<>
         <Button variant="ghost" onClick={onClose} disabled={busy}>Cancelar</Button>
-        <Button type="submit" form="inventory-item-form" variant="hivis" loading={busy} disabled={!valid} icon={<PackagePlus aria-hidden className="size-4" />}>
+        <Button type="submit" form="inventory-item-form" variant="hivis" loading={busy} disabled={readOnly || !valid} icon={<PackagePlus aria-hidden className="size-4" />}>
           {item ? "Salvar alterações" : "Criar item"}
         </Button>
       </>}
     >
       <form id="inventory-item-form" onSubmit={submit} className="space-y-4">
+        {readOnly && <p className="rounded-lg bg-qual-soft px-3 py-2 text-xs font-medium text-qual">Modo visualização (somente leitura): alterações não podem ser salvas.</p>}
         {item ? (
           <div className="rounded-lg border border-line bg-card p-3">
             <p className="text-sm font-bold">{item.brand} {item.format} · {packLabel(item.label, item.unitsPerBox)}</p>
@@ -103,8 +105,9 @@ export function InventoryItemDialog({
   );
 }
 
-export function DeleteInventoryDialog({ item, busy, error, onClose, onConfirm }: {
+export function DeleteInventoryDialog({ item, readOnly = false, busy, error, onClose, onConfirm }: {
   item: InventoryRowDTO;
+  readOnly?: boolean;
   busy: boolean;
   error: string | null;
   onClose: () => void;
@@ -112,7 +115,7 @@ export function DeleteInventoryDialog({ item, busy, error, onClose, onConfirm }:
 }) {
   return <Modal eyebrow="Administração · estoque" title="Excluir este item?" onClose={onClose} width="max-w-lg" footer={<>
     <Button variant="ghost" onClick={onClose} disabled={busy}>Cancelar</Button>
-    <Button variant="danger" loading={busy} onClick={onConfirm} icon={<Trash2 aria-hidden className="size-4" />}>Excluir item</Button>
+    <Button variant="danger" loading={busy} disabled={readOnly} onClick={onConfirm} icon={<Trash2 aria-hidden className="size-4" />}>Excluir item</Button>
   </>}>
     <div className="space-y-3">
       <p className="rounded-lg border border-line bg-card p-3 text-sm font-semibold">{item.name || `${item.brand} ${item.format}`} · {packLabel(item.label, item.unitsPerBox)}</p>

@@ -5,7 +5,7 @@ import { Check, Clock } from "lucide-react";
 import {
   findFamilyDimension,
   missingForReady,
-  PROCESS_STEPS,
+  PRODUCTION_STEPS,
   timeOrderErrors,
   type BatchDTO,
   type DimensionDTO,
@@ -15,7 +15,7 @@ import {
 import { api, errMsg, fmtDuration, fmtInt, fromLocalInput, toLocalInput } from "@/lib/client";
 import { Button, cn, ErrorNote, Field, inputCls, Modal, ProductTag, SectionTitle } from "@/components/ui";
 
-type TimeKey = "mixStart" | "mixEnd" | "fillStart" | "fillEnd" | "finishStart" | "finishEnd";
+type TimeKey = "mixStart" | "mixEnd" | "fillStart" | "fillEnd";
 
 interface FormState extends Record<TimeKey, string> {
   garlicLot: string;
@@ -36,6 +36,7 @@ export function BatchForm({
   products,
   dimensions = [],
   allowMultiFormatBatch = true,
+  readOnly = false,
   onClose,
   onDone,
 }: {
@@ -43,6 +44,7 @@ export function BatchForm({
   products: ProductDTO[];
   dimensions?: DimensionDTO[];
   allowMultiFormatBatch?: boolean;
+  readOnly?: boolean;
   onClose: () => void;
   onDone: (message: string) => void;
 }) {
@@ -65,8 +67,6 @@ export function BatchForm({
     mixEnd: toLocalInput(batch?.mixEnd ?? null),
     fillStart: toLocalInput(batch?.fillStart ?? null),
     fillEnd: toLocalInput(batch?.fillEnd ?? null),
-    finishStart: toLocalInput(batch?.finishStart ?? null),
-    finishEnd: toLocalInput(batch?.finishEnd ?? null),
     goodUnits: batch?.goodUnits?.toString() ?? "",
     lossUnits: batch?.lossUnits?.toString() ?? "",
     notes: batch?.notes ?? "",
@@ -144,8 +144,8 @@ export function BatchForm({
     mixEnd: fromLocalInput(f.mixEnd),
     fillStart: fromLocalInput(f.fillStart),
     fillEnd: fromLocalInput(f.fillEnd),
-    finishStart: fromLocalInput(f.finishStart),
-    finishEnd: fromLocalInput(f.finishEnd),
+    finishStart: null,
+    finishEnd: null,
     goodUnits: toInt(f.goodUnits),
     lossUnits: toInt(f.lossUnits),
     notes: f.notes,
@@ -153,7 +153,7 @@ export function BatchForm({
   const orderErrors = timeOrderErrors(data);
   const missing = missingForReady(data);
   const hasProduct = editing || orderedSelected.length > 0;
-  const canSave = hasProduct && orderErrors.length === 0;
+  const canSave = !readOnly && hasProduct && orderErrors.length === 0;
   const canReady = canSave && missing.length === 0;
 
   const good = data.goodUnits ?? 0;
@@ -221,6 +221,11 @@ export function BatchForm({
       }
     >
       <form id="batch-form" onSubmit={onSubmit} className="space-y-6">
+        {readOnly && (
+          <p className="rounded-lg border border-qual/30 bg-qual-soft px-3 py-2.5 text-sm font-medium text-qual">
+            Modo visualização (somente leitura): você pode testar a seleção e preencher campos para demonstração, mas os botões de salvar ficam desabilitados.
+          </p>
+        )}
         {/* Identificação */}
         <section>
           <SectionTitle>Produto</SectionTitle>
@@ -416,9 +421,11 @@ export function BatchForm({
 
         {/* Tempos */}
         <section>
-          <SectionTitle>Horários de processo</SectionTitle>
+          <SectionTitle aside={<span className="text-xs text-ink-3">Acabamento é preenchido na etapa de Acabamento</span>}>
+            Horários de processo
+          </SectionTitle>
           <div className="space-y-2.5">
-            {PROCESS_STEPS.map((step) => {
+            {PRODUCTION_STEPS.map((step) => {
               const start = data[step.start] as string | null;
               const end = data[step.end] as string | null;
               const invalid = !!start && !!end && new Date(end).getTime() < new Date(start).getTime();

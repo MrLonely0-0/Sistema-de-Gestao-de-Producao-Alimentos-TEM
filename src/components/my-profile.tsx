@@ -5,12 +5,13 @@ import { Camera, CheckCircle2, Lock, Save, Trash2, Upload } from "lucide-react";
 import { useAuth, useUpdateAuth } from "@/components/auth-provider";
 import { usePageLoading } from "@/components/splash-provider";
 import { UserAvatar } from "@/components/user-avatar";
-import { roleLabel, type MyProfileDTO } from "@/lib/domain";
+import { isReadOnly, roleLabel, type MyProfileDTO } from "@/lib/domain";
 import { api, errMsg } from "@/lib/client";
 import { Button, cn, ErrorNote, Field, inputCls, PanelCard, SectionTitle } from "@/components/ui";
 
 export function MyProfile() {
   const signedIn = useAuth();
+  const readOnly = isReadOnly(signedIn.role);
   const updateAuth = useUpdateAuth();
   const [user, setUser] = useState<MyProfileDTO | null>(null);
   const [name, setName] = useState("");
@@ -49,7 +50,7 @@ export function MyProfile() {
   }
 
   async function submit(e: FormEvent) {
-    e.preventDefault(); if (!user) return;
+    e.preventDefault(); if (!user || readOnly) return;
     setError(null); setSaved(null);
     if (newPassword && newPassword !== confirmPassword) { setError("A confirmação da nova senha não confere."); return; }
     setBusy(true);
@@ -75,6 +76,11 @@ export function MyProfile() {
     <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-ink-3">Minha conta</p>
     <h1 className="display mt-1.5 text-[34px]">Meu perfil</h1>
     <p className="mt-2 text-sm text-ink-2">Atualize sua identificação. Foto e descrição são opcionais; deixe a senha em branco para mantê-la.</p>
+    {readOnly && (
+      <p className="mt-3 rounded-lg border border-qual/30 bg-qual-soft px-3 py-2.5 text-sm font-medium text-qual">
+        Conta de visualização (somente leitura): alterações de foto, dados ou senha estão desabilitadas para proteger o acesso compartilhado.
+      </p>
+    )}
     <form onSubmit={submit} className="mt-5 grid items-start gap-4 md:grid-cols-[240px_1fr]">
       <PanelCard>
         <div className="flex flex-col items-center text-center">
@@ -82,9 +88,9 @@ export function MyProfile() {
           <p className="mt-3 break-words text-lg font-bold">{displayName}</p>
           <p className="mt-1 text-xs text-ink-3">{user?.profileName ?? roleLabel(user?.role ?? signedIn.role)}</p>
           <div className="mt-4 flex w-full flex-col gap-2">
-            <Button variant="outline" disabled={busy || !user} icon={<Upload aria-hidden className="size-4" />} onClick={() => gallery.current?.click()}>Escolher foto</Button>
-            <Button variant="ghost" disabled={busy || !user} icon={<Camera aria-hidden className="size-4" />} onClick={() => camera.current?.click()}>Usar câmera</Button>
-            {image && <Button variant="ghost" disabled={busy} className="text-stop hover:text-stop" icon={<Trash2 aria-hidden className="size-3.5" />} onClick={() => { setPhoto(null); setSaved(null); }}>Remover foto</Button>}
+            <Button variant="outline" disabled={readOnly || busy || !user} icon={<Upload aria-hidden className="size-4" />} onClick={() => gallery.current?.click()}>Escolher foto</Button>
+            <Button variant="ghost" disabled={readOnly || busy || !user} icon={<Camera aria-hidden className="size-4" />} onClick={() => camera.current?.click()}>Usar câmera</Button>
+            {image && <Button variant="ghost" disabled={readOnly || busy} className="text-stop hover:text-stop" icon={<Trash2 aria-hidden className="size-3.5" />} onClick={() => { setPhoto(null); setSaved(null); }}>Remover foto</Button>}
           </div>
           <input ref={gallery} type="file" accept="image/jpeg,image/png,image/webp" className="sr-only" aria-label="Foto do perfil" onChange={(e) => void pick(e.target.files?.[0])} />
           <input ref={camera} type="file" accept="image/jpeg,image/png,image/webp" capture="user" className="sr-only" aria-label="Tirar foto do perfil" onChange={(e) => void pick(e.target.files?.[0])} />
@@ -113,7 +119,7 @@ export function MyProfile() {
         </PanelCard>
         <ErrorNote>{error}</ErrorNote>
         {saved && <p role="status" className="flex items-start gap-2 rounded-lg bg-ok-soft p-3 text-sm text-ok"><CheckCircle2 aria-hidden className="mt-0.5 size-4 shrink-0" />{saved}</p>}
-        <div className="flex justify-end"><Button type="submit" variant="hivis" loading={busy} disabled={!user} icon={<Save aria-hidden className="size-4" />}>Salvar perfil</Button></div>
+        <div className="flex justify-end"><Button type="submit" variant="hivis" loading={busy} disabled={readOnly || !user} icon={<Save aria-hidden className="size-4" />}>Salvar perfil</Button></div>
       </div>
     </form>
   </div></div>;

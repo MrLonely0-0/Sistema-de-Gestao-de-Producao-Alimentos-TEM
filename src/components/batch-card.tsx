@@ -2,23 +2,48 @@
 
 import type { DragEvent } from "react";
 import { Paperclip, ShieldCheck, TriangleAlert, Undo2, UserRound } from "lucide-react";
-import { can, missingForReady, READY_TOTAL, roleLabel, type BatchDTO, type Action, type ColumnFeature, type Role, type Status } from "@/lib/domain";
-import { fmtAgo, fmtDateTimeSec, fmtInt, packLabel } from "@/lib/client";
+import {
+  can,
+  isReadOnly,
+  missingForReady,
+  READY_TOTAL,
+  roleLabel,
+  type Action,
+  type AdminCapability,
+  type BatchDTO,
+  type ColumnFeature,
+  type Role,
+  type Status,
+} from "@/lib/domain";
+import { fmtAgo, fmtDateTimeSec, fmtInt, fmtShort, packLabel } from "@/lib/client";
 import { Button, cn, ProductTag, STATUS_STYLE, StatusPill } from "@/components/ui";
 
 export type CardCta = { kind: "edit" | "inspect" | "finish"; label: string } | null;
 
-/** Ação principal do card para o perfil logado (ou nenhuma, se for só leitura). */
-export function ctaFor(batch: BatchDTO, role: Role, features: ColumnFeature[] = [], permissions: readonly Action[] = []): CardCta {
+/** Ação principal do card para o perfil logado (inclui visualização para demonstração). */
+export function ctaFor(
+  batch: BatchDTO,
+  role: Role,
+  features: ColumnFeature[] = [],
+  permissions: readonly Action[] = [],
+  adminCapabilities?: readonly AdminCapability[],
+): CardCta {
   const on = (feature: ColumnFeature) => features.length === 0 || features.includes(feature);
-  if (batch.status === "em_preparo" && can(role, "editar", permissions) && on("editar")) {
-    return { kind: "edit", label: missingForReady(batch).length > 0 ? "Completar dados" : "Revisar e marcar Pronto" };
+  const viewer = isReadOnly(role);
+  if (batch.status === "em_preparo" && (viewer || (can(role, "editar", permissions, adminCapabilities) && on("editar")))) {
+    return {
+      kind: "edit",
+      label: viewer ? "Visualizar edição" : missingForReady(batch).length > 0 ? "Completar dados" : "Revisar e marcar Pronto",
+    };
   }
-  if ((batch.status === "pronto" || batch.status === "retido") && can(role, "liberar", permissions) && on("liberar")) {
-    return { kind: "inspect", label: batch.status === "retido" ? "Reavaliar lote" : "Inspecionar lote" };
+  if ((batch.status === "pronto" || batch.status === "retido") && (viewer || (can(role, "liberar", permissions, adminCapabilities) && on("liberar")))) {
+    return {
+      kind: "inspect",
+      label: viewer ? "Visualizar inspeção" : batch.status === "retido" ? "Reavaliar lote" : "Inspecionar lote",
+    };
   }
-  if (batch.status === "liberado" && can(role, "finalizar", permissions) && on("finalizar")) {
-    return { kind: "finish", label: "Definir caixas" };
+  if (batch.status === "liberado" && (viewer || (can(role, "finalizar", permissions, adminCapabilities) && on("finalizar")))) {
+    return { kind: "finish", label: viewer ? "Visualizar caixas" : "Definir caixas" };
   }
   return null;
 }
@@ -36,6 +61,7 @@ export function BatchCard({
   role,
   features = [],
   permissions = [],
+  adminCapabilities,
   draggable,
   dragging,
   onOpen,
@@ -47,6 +73,7 @@ export function BatchCard({
   role: Role;
   features?: ColumnFeature[];
   permissions?: readonly Action[];
+  adminCapabilities?: readonly AdminCapability[];
   draggable: boolean;
   dragging: boolean;
   onOpen: () => void;
@@ -54,7 +81,7 @@ export function BatchCard({
   onDragStart: (e: DragEvent<HTMLElement>) => void;
   onDragEnd: () => void;
 }) {
-  const cta = ctaFor(batch, role, features, permissions);
+  const cta = ctaFor(batch, role, features, permissions, adminCapabilities);
   const [ageLabel, ageAt] = AGE[batch.status](batch);
   const done = READY_TOTAL - missingForReady(batch).length;
 
@@ -159,6 +186,13 @@ export function BatchCard({
             <span>
               Liberado <span className="tnum whitespace-nowrap">{fmtDateTimeSec(batch.releasedAt)}</span>
             </span>
+          </p>
+        )}
+
+        {batch.status === "liberado" && (batch.finishStart || batch.finishEnd) && (
+          <p className="mt-1.5 text-[11px] text-acab">
+            Acabamento: {batch.finishStart ? `início ${fmtShort(batch.finishStart)}` : "sem início"}
+            {batch.finishEnd ? ` · fim ${fmtShort(batch.finishEnd)}` : " · fim pendente"}
           </p>
         )}
 

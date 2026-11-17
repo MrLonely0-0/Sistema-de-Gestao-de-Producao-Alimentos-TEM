@@ -7,6 +7,8 @@ import { useAuth } from "@/components/auth-provider";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { BarChart3, Download, FileDown, Filter, RefreshCw } from "lucide-react";
 import {
+  hasAdminCapability,
+  isReadOnly,
   REPORT_DATASETS,
   STATUS_LABEL,
   type ReportsDTO,
@@ -170,7 +172,7 @@ export function ReportsPanel() {
         <p className="text-xs text-ink-3">Ligado às bateladas e ao estoque · atualiza automaticamente a cada 8 segundos. Excluídos só aparecem ao ativar a opção de auditoria.</p>
         {!!data?.demoBatches && <div className="flex flex-wrap items-center gap-2 rounded-lg border border-prod/25 bg-prod-soft px-3 py-3 text-sm text-prod">
           <span className="flex-1"><strong>{data.demoBatches} batelada(s) de demonstração</strong> ainda estão neste banco. Limpe os exemplos antes de publicar uma cópia dele.</span>
-          {user.role === "admin" && <SplashLink href="/admin?section=dados" className="rounded-lg border border-prod/30 px-3 py-2 text-xs font-bold transition hover:bg-white/50">Gerenciar dados</SplashLink>}
+          {(isReadOnly(user.role) || hasAdminCapability(user, "admin_dados")) && <SplashLink href="/admin?section=dados" className="rounded-lg border border-prod/30 px-3 py-2 text-xs font-bold transition hover:bg-white/50">Gerenciar dados</SplashLink>}
         </div>}
 
         {/* Filtros */}
@@ -319,16 +321,31 @@ export function ReportsPanel() {
                 <FileDown aria-hidden className="size-5 text-hivis" />
                 <div className="mr-auto">
                   <p className="display text-[20px]">Exportar dados</p>
-                  <p className="text-xs text-paper/70">Arquivos respeitam os filtros acima · CSV pronto para Excel pt-BR</p>
+                  <p className="text-xs text-paper/70">
+                    {isReadOnly(user.role)
+                      ? "Exportação desabilitada no modo visualização (somente leitura)"
+                      : "Arquivos respeitam os filtros acima · CSV pronto para Excel pt-BR"}
+                  </p>
                 </div>
-                <a
-                  href={exportHref("completo", "csv")}
-                  download
-                  className="on-dark flex h-10 items-center gap-2 rounded-lg bg-hivis px-3.5 text-[13px] font-bold text-ink transition hover:brightness-95"
-                >
-                  <Download aria-hidden className="size-4" />
-                  Relatório completo
-                </a>
+                {isReadOnly(user.role) ? (
+                  <button
+                    type="button"
+                    disabled
+                    className="on-dark flex h-10 cursor-not-allowed items-center gap-2 rounded-lg bg-hivis/40 px-3.5 text-[13px] font-bold text-ink/60 opacity-70"
+                  >
+                    <Download aria-hidden className="size-4" />
+                    Relatório completo
+                  </button>
+                ) : (
+                  <a
+                    href={exportHref("completo", "csv")}
+                    download
+                    className="on-dark flex h-10 items-center gap-2 rounded-lg bg-hivis px-3.5 text-[13px] font-bold text-ink transition hover:brightness-95"
+                  >
+                    <Download aria-hidden className="size-4" />
+                    Relatório completo
+                  </a>
+                )}
               </div>
               <ul className="divide-y divide-line">
                 {REPORT_DATASETS.map((d) => (
@@ -337,20 +354,33 @@ export function ReportsPanel() {
                       <p className="text-sm font-semibold">{d.label}</p>
                       <p className="text-xs text-ink-3">{d.description}</p>
                     </div>
-                    <a
-                      href={exportHref(d.id, "csv")}
-                      download
-                      className="flex h-9 items-center gap-1.5 rounded-lg border border-ink/25 px-3 text-xs font-bold transition hover:border-ink"
-                    >
-                      <Download aria-hidden className="size-3.5" /> CSV
-                    </a>
-                    <a
-                      href={exportHref(d.id, "json")}
-                      download
-                      className="flex h-9 items-center gap-1.5 rounded-lg border border-ink/25 px-3 text-xs font-bold transition hover:border-ink"
-                    >
-                      <Download aria-hidden className="size-3.5" /> JSON
-                    </a>
+                    {isReadOnly(user.role) ? (
+                      <>
+                        <button type="button" disabled className="flex h-9 cursor-not-allowed items-center gap-1.5 rounded-lg border border-ink/15 px-3 text-xs font-bold text-ink-3 opacity-55">
+                          <Download aria-hidden className="size-3.5" /> CSV
+                        </button>
+                        <button type="button" disabled className="flex h-9 cursor-not-allowed items-center gap-1.5 rounded-lg border border-ink/15 px-3 text-xs font-bold text-ink-3 opacity-55">
+                          <Download aria-hidden className="size-3.5" /> JSON
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <a
+                          href={exportHref(d.id, "csv")}
+                          download
+                          className="flex h-9 items-center gap-1.5 rounded-lg border border-ink/25 px-3 text-xs font-bold transition hover:border-ink"
+                        >
+                          <Download aria-hidden className="size-3.5" /> CSV
+                        </a>
+                        <a
+                          href={exportHref(d.id, "json")}
+                          download
+                          className="flex h-9 items-center gap-1.5 rounded-lg border border-ink/25 px-3 text-xs font-bold transition hover:border-ink"
+                        >
+                          <Download aria-hidden className="size-3.5" /> JSON
+                        </a>
+                      </>
+                    )}
                   </li>
                 ))}
               </ul>

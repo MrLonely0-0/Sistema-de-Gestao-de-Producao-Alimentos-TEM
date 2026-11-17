@@ -3,8 +3,8 @@
 import { SplashLink as Link } from "@/components/splash-provider";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { BarChart3, Boxes, LayoutGrid, LoaderCircle, LogOut, MessageSquare, Settings } from "lucide-react";
-import { ROLE_LABEL, type SessionUser } from "@/lib/domain";
+import { BarChart3, Boxes, Eye, LayoutGrid, LoaderCircle, LogOut, MessageSquare, Settings } from "lucide-react";
+import { canOpenAdmin, isReadOnly, ROLE_LABEL, type SessionUser } from "@/lib/domain";
 import { api, setToken } from "@/lib/client";
 import { cn } from "@/components/ui";
 import { UserAvatar } from "@/components/user-avatar";
@@ -56,12 +56,13 @@ export function TopBar({ user }: { user: SessionUser }) {
     }
   }
 
+  const readOnly = isReadOnly(user.role);
   const links = [
     { href: "/", label: "Painel", icon: LayoutGrid, show: true },
     { href: "/relatorios", label: "Relatórios", icon: BarChart3, show: true },
     { href: "/estoque", label: "Estoque", icon: Boxes, show: true },
     { href: "/chat", label: "Conversa", icon: MessageSquare, show: true },
-    { href: "/admin", label: "Admin", icon: Settings, show: user.role === "admin" },
+    { href: "/admin", label: "Admin", icon: Settings, show: canOpenAdmin(user) },
   ].filter((l) => l.show);
 
   return (
@@ -96,6 +97,12 @@ export function TopBar({ user }: { user: SessionUser }) {
       </nav>
 
       <div className="ml-auto flex min-w-0 items-center gap-2 sm:gap-3">
+        {readOnly && (
+          <span className="hidden items-center gap-1 rounded-md border border-hivis/50 bg-hivis/15 px-2 py-1 text-[11px] font-bold uppercase tracking-wide text-hivis md:inline-flex">
+            <Eye aria-hidden className="size-3.5" />
+            Somente leitura
+          </span>
+        )}
         <Link href="/perfil" aria-label="Meu perfil" title="Editar meu perfil" className="flex min-w-0 items-center gap-2 rounded-lg px-1.5 py-1 transition hover:bg-paper/10">
           <div className="hidden min-w-0 text-right leading-tight sm:block">
             <p className="truncate text-[13px] font-semibold">{user.name}</p>

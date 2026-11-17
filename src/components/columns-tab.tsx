@@ -26,10 +26,12 @@ type Dialog = { kind: "create" } | { kind: "edit"; column: ColumnDTO } | { kind:
 export function ColumnsTab({
   columns,
   allowMultiFormatBatch,
+  readOnly = false,
   run,
 }: {
   columns: ColumnDTO[];
   allowMultiFormatBatch: boolean;
+  readOnly?: boolean;
   run: Run;
 }) {
   const toast = useToast();
@@ -38,6 +40,7 @@ export function ColumnsTab({
   const [error, setError] = useState<string | null>(null);
 
   async function move(column: ColumnDTO, direction: -1 | 1) {
+    if (readOnly) return;
     const order = columns.map((c) => c.id);
     const i = order.indexOf(column.id);
     const j = i + direction;
@@ -47,6 +50,7 @@ export function ColumnsTab({
   }
 
   async function save(body: Record<string, unknown>, ok: string) {
+    if (readOnly) return;
     setBusy(true);
     setError(null);
     const done = await run(
@@ -58,6 +62,7 @@ export function ColumnsTab({
   }
 
   async function remove(column: ColumnDTO) {
+    if (readOnly) return;
     setBusy(true);
     setError(null);
     const done = await run(() => api(`/api/admin/columns?id=${column.id}`, { method: "DELETE" }), `Painel ${column.name} excluído.`);
@@ -67,7 +72,7 @@ export function ColumnsTab({
 
   return (
     <div className="space-y-5">
-      <MultiFormatSettingCard allowMultiFormatBatch={allowMultiFormatBatch} run={run} />
+      <MultiFormatSettingCard allowMultiFormatBatch={allowMultiFormatBatch} readOnly={readOnly} run={run} />
 
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
@@ -92,7 +97,7 @@ export function ColumnsTab({
                   <button
                     type="button"
                     aria-label={`Mover ${c.name} para a esquerda`}
-                    disabled={i === 0}
+                    disabled={readOnly || i === 0}
                     onClick={() => void move(c, -1)}
                     className="grid size-9 place-items-center rounded-lg border border-ink/20 bg-white transition hover:border-ink disabled:opacity-30"
                   >
@@ -101,7 +106,7 @@ export function ColumnsTab({
                   <button
                     type="button"
                     aria-label={`Mover ${c.name} para a direita`}
-                    disabled={i === columns.length - 1}
+                    disabled={readOnly || i === columns.length - 1}
                     onClick={() => void move(c, 1)}
                     className="grid size-9 place-items-center rounded-lg border border-ink/20 bg-white transition hover:border-ink disabled:opacity-30"
                   >
@@ -137,6 +142,7 @@ export function ColumnsTab({
                 <div className="flex shrink-0 items-center gap-2">
                   <Switch
                     checked={c.active}
+                    disabled={readOnly}
                     label={`Painel ${c.name} ativo`}
                     onChange={(active) => void run(() => api("/api/admin/columns", { method: "PATCH", body: { id: c.id, active } }))}
                   />
@@ -174,6 +180,7 @@ export function ColumnsTab({
       {(dialog?.kind === "create" || dialog?.kind === "edit") && (
         <ColumnFormDialog
           column={dialog.kind === "edit" ? dialog.column : undefined}
+          readOnly={readOnly}
           busy={busy}
           error={error}
           onClose={() => setDialog(null)}
@@ -191,12 +198,13 @@ export function ColumnsTab({
               <Button variant="ghost" onClick={() => setDialog(null)} disabled={busy}>
                 Cancelar
               </Button>
-              <Button variant="danger" loading={busy} onClick={() => void remove(dialog.column)}>
+              <Button variant="danger" loading={busy} disabled={readOnly} onClick={() => void remove(dialog.column)}>
                 Excluir painel
               </Button>
             </>
           }
         >
+          {readOnly && <p className="mb-3 rounded-lg bg-qual-soft px-3 py-2 text-xs font-medium text-qual">Modo visualização (somente leitura): a exclusão está desabilitada.</p>}
           <p className="text-sm leading-relaxed text-ink-2">
             O painel sai do quadro. Para excluir, todos os status dele precisam estar em outro painel ativo — mova-os antes se o sistema avisar.
             As bateladas não são apagadas.
@@ -210,12 +218,14 @@ export function ColumnsTab({
 
 function ColumnFormDialog({
   column,
+  readOnly,
   busy,
   error,
   onClose,
   onSubmit,
 }: {
   column?: ColumnDTO;
+  readOnly: boolean;
   busy: boolean;
   error: string | null;
   onClose: () => void;
@@ -235,6 +245,7 @@ function ColumnFormDialog({
 
   function submit(e: FormEvent) {
     e.preventDefault();
+    if (readOnly) return;
     onSubmit({
       ...(column ? { id: column.id } : {}),
       name,
@@ -259,13 +270,14 @@ function ColumnFormDialog({
           <Button variant="ghost" onClick={onClose} disabled={busy}>
             Cancelar
           </Button>
-          <Button type="submit" form="column-form" loading={busy} disabled={!name.trim()}>
+          <Button type="submit" form="column-form" loading={busy} disabled={readOnly || !name.trim()}>
             Salvar painel
           </Button>
         </>
       }
     >
       <form id="column-form" onSubmit={submit} className="space-y-4">
+        {readOnly && <p className="rounded-lg bg-qual-soft px-3 py-2 text-xs font-medium text-qual">Modo visualização (somente leitura): alterações não podem ser salvas.</p>}
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Nome do painel">
             <input className={inputCls} autoFocus value={name} maxLength={30} onChange={(e) => setName(e.target.value)} />

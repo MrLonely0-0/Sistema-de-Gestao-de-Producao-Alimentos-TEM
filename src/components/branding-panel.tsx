@@ -6,12 +6,14 @@ import { CheckCircle2, ClipboardPaste, FileImage, Play, ShieldCheck, Trash2, Upl
 import { api, errMsg } from "@/lib/client";
 import { BRAND_IMAGE_MAX_BYTES, type BrandingInfo } from "@/lib/branding-shared";
 import { Button, ErrorNote, PanelCard, SectionTitle } from "@/components/ui";
+import { useReadOnly } from "@/components/auth-provider";
 import { SplashPreview } from "@/components/splash-preview";
 
 type BrandingResponse = { branding: BrandingInfo | null; imageDataUrl: string | null };
 const signature = [137, 80, 78, 71, 13, 10, 26, 10];
 
 export function BrandingPanel() {
+  const readOnly = useReadOnly();
   const router = useRouter();
   const [branding, setBranding] = useState<BrandingInfo | null>(null);
   const [storedImage, setStoredImage] = useState<string | null>(null);
@@ -78,7 +80,7 @@ export function BrandingPanel() {
   }
 
   async function save() {
-    if (!file) return;
+    if (!file || readOnly) return;
     setBusy(true); setError(null); setSuccess(false);
     try {
       const imageData = await new Promise<string>((resolve, reject) => {
@@ -101,7 +103,7 @@ export function BrandingPanel() {
   }
 
   async function remove() {
-    if (!storedImage || busy) return;
+    if (!storedImage || busy || readOnly) return;
     setBusy(true); setError(null); setSuccess(false);
     try {
       await api("/api/admin/branding", { method: "DELETE" });
@@ -154,9 +156,9 @@ export function BrandingPanel() {
             {file && <p className="mt-3 break-all text-sm font-semibold">{file.name}</p>}
           </div>
           <div className="mt-4 flex flex-wrap items-center gap-2">
-            <Button variant="hivis" disabled={!file || !loaded || !canPreview} loading={busy} onClick={() => void save()}>Aplicar imagem e favicons</Button>
+            <Button variant="hivis" disabled={readOnly || !file || !loaded || !canPreview} loading={busy} onClick={() => void save()}>Aplicar imagem e favicons</Button>
             {file && <Button variant="ghost" disabled={busy} onClick={clearSelection}>Cancelar</Button>}
-            {!file && storedImage && <Button variant="ghost" className="text-stop hover:bg-stop-soft hover:text-stop" disabled={busy} icon={<Trash2 aria-hidden className="size-4" />} onClick={() => void remove()}>Remover imagem</Button>}
+            {!file && storedImage && <Button variant="ghost" className="text-stop hover:bg-stop-soft hover:text-stop" disabled={readOnly || busy} icon={<Trash2 aria-hidden className="size-4" />} onClick={() => void remove()}>Remover imagem</Button>}
           </div>
           <div className="mt-3"><ErrorNote>{error}</ErrorNote></div>
           <p className="mt-3 flex items-start gap-2 text-xs leading-relaxed text-ink-3"><ShieldCheck aria-hidden className="mt-px size-4 shrink-0" />O original é salvo sem reprocessamento e incorporado à página. A confirmação só aparece depois de verificar o arquivo salvo.</p>
