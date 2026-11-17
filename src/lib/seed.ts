@@ -1,4 +1,4 @@
-import { count, eq, sql } from "drizzle-orm";
+import { and, asc, count, eq, isNull, sql } from "drizzle-orm";
 import { appState, chatChannels } from "@/db/schema";
 import { tagLegacyDemo } from "@/lib/demo-service";
 import { db, hasDatabaseUrl } from "@/db";
@@ -201,8 +201,44 @@ async function ensureGestor(tx: Tx): Promise<boolean> {
   const [{ n }] = await tx.select({ n: count() }).from(users);
   if (n > 0) return true;
   if (!GESTOR_EMAIL || GESTOR_PASSWORD.length < 8) return false;
-  await tx.insert(users).values({ name: GESTOR_NAME, email: GESTOR_EMAIL, role: "admin", passwordHash: hashPassword(GESTOR_PASSWORD) });
+  await tx.insert(users).values({
+    name: GESTOR_NAME,
+    email: GESTOR_EMAIL,
+    role: "admin_master",
+    passwordHash: hashPassword(GESTOR_PASSWORD),
+  });
   return true;
+}
+
+/** Garante que exista um Administrador Master ativo em bancos migrados da versão anterior. */
+async function ensureMasterAdmin(tx: Tx): Promise<void> {
+  const [master] = await tx
+    .select({ id: users.id })
+    .from(users)
+    .where(and(eq(users.role, "admin_master"), eq(users.active, true), isNull(users.deletedAt)))
+    .limit(1);
+  if (master) return;
+
+  const preferredEmail = (process.env.ADMIN_MASTER_EMAIL?.trim() || GESTOR_EMAIL).toLowerCase();
+  const [preferred] = await tx
+    .select({ id: users.id, role: users.role })
+    .from(users)
+    .where(and(eq(users.email, preferredEmail), eq(users.active, true), isNull(users.deletedAt)))
+    .limit(1);
+  if (preferred && (preferred.role === "admin" || preferred.role === "admin_master")) {
+    await tx.update(users).set({ role: "admin_master", updatedAt: new Date() }).where(eq(users.id, preferred.id));
+    return;
+  }
+
+  const [firstAdmin] = await tx
+    .select({ id: users.id })
+    .from(users)
+    .where(and(eq(users.role, "admin"), eq(users.active, true), isNull(users.deletedAt)))
+    .orderBy(asc(users.id))
+    .limit(1);
+  if (firstAdmin) {
+    await tx.update(users).set({ role: "admin_master", updatedAt: new Date() }).where(eq(users.id, firstAdmin.id));
+  }
 }
 
 async function seed(): Promise<boolean> {
@@ -210,7 +246,12 @@ async function seed(): Promise<boolean> {
     // Evita seed duplicado quando duas instâncias sobem ao mesmo tempo.
     await tx.execute(sql`select pg_advisory_xact_lock(7405101)`);
 
+    // Garante colunas recentes antes de consultar app_state em bancos já existentes.
+    await tx.execute(sql`ALTER TABLE public.app_state ADD COLUMN IF NOT EXISTS allow_multi_format_batch boolean NOT NULL DEFAULT true`);
+    await tx.execute(sql`ALTER TABLE public.app_state ADD COLUMN IF NOT EXISTS admin_limits jsonb`);
+
     if (!(await ensureGestor(tx))) return false;
+    await ensureMasterAdmin(tx);
     await tx.insert(appState).values({ id: "lifecycle" }).onConflictDoNothing();
     const [lifecycle] = await tx.select().from(appState).where(eq(appState.id, "lifecycle"));
 
@@ -248,11 +289,15 @@ async function seed(): Promise<boolean> {
       outputs?: Array<[units: number, boxes: number]>;
     };
 
-    const full = (start: number) => ({
+    const prodOnly = (start: number) => ({
       mixStart: ago(start),
       mixEnd: ago(start - 0.75),
       fillStart: ago(start - 1),
       fillEnd: ago(start - 2.5),
+    });
+
+    const full = (start: number) => ({
+      ...prodOnly(start),
       finishStart: ago(start - 2.6),
       finishEnd: ago(start - 3.4),
     });
@@ -286,7 +331,7 @@ async function seed(): Promise<boolean> {
       },
       {
         brand: "Feliz", format: "160 g", status: "liberado",
-        garlicLot: "AL-2304", preservativeLot: "CS-0121", ...full(9), goodUnits: 2400, lossUnits: 36,
+        garlicLot: "AL-2304", preservativeLot: "CS-0121", ...prodOnly(9), finishStart: ago(1.1), goodUnits: 2400, lossUnits: 36,
         createdAt: ago(9), readyAt: ago(5.2), releasedAt: ago(1.4), releasedByName: by("qualidade"),
         events: [
           ["criada", 'Batelada #1 aberta em "Em preparo".', "producao", 9],
@@ -296,7 +341,7 @@ async function seed(): Promise<boolean> {
       },
       {
         brand: "TEM", format: "450 g", status: "retido",
-        garlicLot: "AL-2304", preservativeLot: "CS-0121", ...full(8), goodUnits: 1380, lossUnits: 51,
+        garlicLot: "AL-2304", preservativeLot: "CS-0121", ...prodOnly(8), goodUnits: 1380, lossUnits: 51,
         createdAt: ago(8), readyAt: ago(4.4), heldAt: ago(2),
         qualityNote: "pH acima do limite na primeira leitura. Aguardando reanálise da amostra.",
         events: [
@@ -307,7 +352,7 @@ async function seed(): Promise<boolean> {
       },
       {
         brand: "Feliz", format: "450 g", status: "pronto",
-        garlicLot: "AL-2310", preservativeLot: "CS-0121", ...full(4.6), goodUnits: 1296, lossUnits: 14,
+        garlicLot: "AL-2310", preservativeLot: "CS-0121", ...prodOnly(4.6), goodUnits: 1296, lossUnits: 14,
         createdAt: ago(4.6), readyAt: ago(1),
         events: [
           ["criada", 'Batelada #1 aberta em "Em preparo".', "producao", 4.6],

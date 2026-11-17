@@ -3,7 +3,17 @@ import { z } from "zod";
 import { db } from "@/db";
 import { chatChannels, chatMembers, chatMessages, chatReads, users } from "@/db/schema";
 import { ApiError } from "@/lib/api";
-import { avatarUrl, roleLabel, type ChatDTO, type ChatChannelDTO, type ChatUnreadDTO, type SessionUser } from "@/lib/domain";
+import { assertAdmin } from "@/lib/access-control";
+import {
+  avatarUrl,
+  hasAdminCapability,
+  isReadOnly,
+  roleLabel,
+  type ChatDTO,
+  type ChatChannelDTO,
+  type ChatUnreadDTO,
+  type SessionUser,
+} from "@/lib/domain";
 
 const text = z.string().trim().max(4000, "Máximo de 4.000 caracteres.");
 const imageSchema = z
@@ -128,8 +138,8 @@ export async function getChat(user: SessionUser, channelId?: number): Promise<Ch
       imageName: m.imageName,
       createdAt: m.createdAt.toISOString(),
       editedAt: m.editedAt?.toISOString() ?? null,
-      canEdit: m.userId === user.id || user.role === "admin",
-      canDelete: m.userId === user.id || user.role === "admin",
+      canEdit: !isReadOnly(user.role) && (m.userId === user.id || hasAdminCapability(user, "moderar_chat")),
+      canDelete: !isReadOnly(user.role) && (m.userId === user.id || hasAdminCapability(user, "moderar_chat")),
     })),
   };
 }
@@ -149,6 +159,7 @@ export async function ensureMember(channelId: number, userId: number) {
 }
 
 export async function openDirect(user: SessionUser, raw: unknown): Promise<{ channelId: number }> {
+  if (isReadOnly(user.role)) throw new ApiError(403, "Modo visualização (somente leitura): não é possível iniciar conversas.");
   const { userId } = z.object({ userId: z.number().int().positive() }).parse(raw);
   if (userId === user.id) throw new ApiError(400, "Escolha outro colaborador para a conversa particular.");
   const [peer] = await db.select().from(users).where(and(eq(users.id, userId), eq(users.active, true), isNull(users.deletedAt)));
@@ -170,6 +181,7 @@ export async function openDirect(user: SessionUser, raw: unknown): Promise<{ cha
 }
 
 export async function sendMessage(user: SessionUser, raw: unknown) {
+  if (isReadOnly(user.role)) throw new ApiError(403, "Modo visualização (somente leitura): não é possível enviar mensagens.");
   const data = z
     .object({ channelId: z.number().int().positive(), content: text, imageData: imageSchema, imageName: z.string().trim().max(160).nullish().transform((v) => v || null) })
     .parse(raw);
@@ -192,21 +204,28 @@ export async function sendMessage(user: SessionUser, raw: unknown) {
 }
 
 export async function editMessage(user: SessionUser, raw: unknown) {
+  if (isReadOnly(user.role)) throw new ApiError(403, "Modo visualização (somente leitura): alterações não são permitidas.");
   const { id, content } = z.object({ id: z.number().int().positive(), content: text.min(1, "Escreva a mensagem.") }).parse(raw);
   const [m] = await db.select().from(chatMessages).where(eq(chatMessages.id, id));
   if (!m || m.deletedAt) throw new ApiError(404, "Mensagem não encontrada.");
-  if (m.userId !== user.id && user.role !== "admin") throw new ApiError(403, "Você só pode editar as suas mensagens.");
+  if (m.userId !== user.id && !hasAdminCapability(user, "moderar_chat")) {
+    throw new ApiError(403, "Você só pode editar as suas mensagens.");
+  }
   await db.update(chatMessages).set({ content, editedAt: new Date() }).where(eq(chatMessages.id, id));
 }
 
 export async function deleteMessage(user: SessionUser, id: number) {
+  if (isReadOnly(user.role)) throw new ApiError(403, "Modo visualização (somente leitura): exclusões não são permitidas.");
   const [m] = await db.select().from(chatMessages).where(eq(chatMessages.id, id));
   if (!m || m.deletedAt) throw new ApiError(404, "Mensagem não encontrada.");
-  if (m.userId !== user.id && user.role !== "admin") throw new ApiError(403, "Você só pode excluir as suas mensagens.");
+  if (m.userId !== user.id && !hasAdminCapability(user, "moderar_chat")) {
+    throw new ApiError(403, "Você só pode excluir as suas mensagens.");
+  }
   await db.update(chatMessages).set({ deletedAt: new Date() }).where(eq(chatMessages.id, id));
 }
 
 export async function markRead(user: SessionUser, channelId: number) {
+  if (isReadOnly(user.role)) throw new ApiError(403, "Modo visualização (somente leitura): não é possível registrar leitura.");
   await db
     .insert(chatReads)
     .values({ userId: user.id, channelId, lastReadAt: new Date() })
@@ -214,7 +233,7 @@ export async function markRead(user: SessionUser, channelId: number) {
 }
 
 export async function createChannel(user: SessionUser, raw: unknown) {
-  if (user.role !== "admin") throw new ApiError(403, "Apenas o administrador pode criar canais.");
+  assertAdmin(user, "moderar_chat");
   const data = channelSchema.parse(raw);
   try {
     await db.insert(chatChannels).values({ ...data, kind: "channel" });
@@ -226,12 +245,12 @@ export async function createChannel(user: SessionUser, raw: unknown) {
 }
 
 export async function updateChannel(user: SessionUser, raw: unknown) {
-  if (user.role !== "admin") throw new ApiError(403, "Apenas o administrador pode editar canais.");
+  assertAdmin(user, "moderar_chat");
   const { id, ...data } = z.object({ id: z.number().int().positive() }).merge(channelSchema.partial()).parse(raw);
   await db.update(chatChannels).set(data).where(and(eq(chatChannels.id, id), eq(chatChannels.kind, "channel")));
 }
 
 export async function deleteChannel(user: SessionUser, id: number) {
-  if (user.role !== "admin") throw new ApiError(403, "Apenas o administrador pode excluir canais.");
+  assertAdmin(user, "moderar_chat");
   await db.update(chatChannels).set({ active: false }).where(eq(chatChannels.id, id));
 }

@@ -6,10 +6,13 @@ import { db } from "@/db";
 import { users } from "@/db/schema";
 import { ApiError, pgCode } from "@/lib/api";
 import { hashPassword, verifyPassword } from "@/lib/auth";
-import { assertAdmin, ensureAnotherAdmin, lockAccess, resolveRole, revokeSessions } from "@/lib/access-control";
-import { avatarUrl, type MyProfileDTO, type Role, type SessionUser } from "@/lib/domain";
+import { assertAdmin, ensureAnotherMasterAdmin, lockAccess, resolveRole, revokeSessions } from "@/lib/access-control";
+import { avatarUrl, isAnyAdmin, isMasterAdmin, isReadOnly, type MyProfileDTO, type Role, type SessionUser } from "@/lib/domain";
 
-export const roleInput = z.string().regex(/^(admin|producao|qualidade|acabamento|logistica|custom:[1-9]\d*)$/, "Perfil inválido.").transform((v) => v as Role);
+export const roleInput = z
+  .string()
+  .regex(/^(admin_master|admin|producao|qualidade|acabamento|logistica|viewer|custom:[1-9]\d*)$/, "Perfil inválido.")
+  .transform((v) => v as Role);
 const name = z.string().trim().min(2, "Use pelo menos 2 caracteres no nome.").max(80);
 const email = z.string().trim().toLowerCase().max(254, "O e-mail deve ter até 254 caracteres.").pipe(z.email("Informe um e-mail válido."));
 const password = z.string().min(8, "A senha precisa ter pelo menos 8 caracteres.").max(128);
@@ -25,8 +28,11 @@ function emailConflict(e: unknown): never {
 }
 
 export async function createUser(actor: SessionUser, raw: unknown) {
-  assertAdmin(actor);
+  assertAdmin(actor, "admin_usuarios");
   const data = createSchema.parse(raw);
+  if (isAnyAdmin(data.role) && !isMasterAdmin(actor.role)) {
+    throw new ApiError(403, "Apenas o Administrador Master pode criar contas de administrador.");
+  }
   try {
     return await db.transaction(async (tx) => {
       await lockAccess(tx);
@@ -38,15 +44,25 @@ export async function createUser(actor: SessionUser, raw: unknown) {
 }
 
 export async function updateUser(actor: SessionUser, raw: unknown, currentToken?: string | null) {
-  assertAdmin(actor);
+  assertAdmin(actor, "admin_usuarios");
   const { id, password: newPassword, role, ...changes } = updateSchema.parse(raw);
   try {
     await db.transaction(async (tx) => {
       await lockAccess(tx);
       const [target] = await tx.select().from(users).where(and(eq(users.id, id), isNull(users.deletedAt))).for("update");
       if (!target) throw new ApiError(404, "Usuário não encontrado.");
-      if (actor.id === id && (changes.active === false || (role && role !== "admin"))) throw new ApiError(400, "Você não pode remover o seu próprio acesso de administrador.");
-      if (target.role === "admin" && target.active && (changes.active === false || (role && role !== "admin"))) await ensureAnotherAdmin(tx, id);
+
+      if ((isAnyAdmin(target.role) || (role && isAnyAdmin(role))) && !isMasterAdmin(actor.role)) {
+        throw new ApiError(403, "Apenas o Administrador Master pode alterar ou gerenciar contas de administrador.");
+      }
+
+      if (actor.id === id && (changes.active === false || (role && role !== actor.role))) {
+        throw new ApiError(400, "Você não pode remover ou desativar o seu próprio acesso.");
+      }
+      if (target.role === "admin_master" && target.active && (changes.active === false || (role && role !== "admin_master"))) {
+        await ensureAnotherMasterAdmin(tx, id);
+      }
+
       const resolved = role ? await resolveRole(tx, role) : {};
       await tx.update(users).set({ ...changes, ...resolved, ...(newPassword ? { passwordHash: hashPassword(newPassword) } : {}), updatedAt: new Date() }).where(eq(users.id, id));
       if (changes.active === false || newPassword || (role && role !== target.role) || (changes.email && changes.email !== target.email)) {
@@ -58,13 +74,16 @@ export async function updateUser(actor: SessionUser, raw: unknown, currentToken?
 
 /** Excluir impede login e remove da lista, sem destruir os registros feitos por essa pessoa. */
 export async function deleteUser(actor: SessionUser, id: number) {
-  assertAdmin(actor);
+  assertAdmin(actor, "admin_usuarios");
   if (actor.id === id) throw new ApiError(400, "Você não pode excluir a conta que está usando.");
   await db.transaction(async (tx) => {
     await lockAccess(tx);
     const [target] = await tx.select().from(users).where(and(eq(users.id, id), isNull(users.deletedAt))).for("update");
     if (!target) throw new ApiError(404, "Usuário não encontrado.");
-    if (target.role === "admin" && target.active) await ensureAnotherAdmin(tx, id);
+    if (isAnyAdmin(target.role) && !isMasterAdmin(actor.role)) {
+      throw new ApiError(403, "Apenas o Administrador Master pode excluir contas de administrador.");
+    }
+    if (target.role === "admin_master" && target.active) await ensureAnotherMasterAdmin(tx, id);
     await tx.update(users).set({ active: false, deletedAt: new Date(), deletedByName: actor.name, avatarData: null, avatarVersion: null, bio: null, updatedAt: new Date() }).where(eq(users.id, id));
     await revokeSessions(tx, id);
   });
@@ -102,6 +121,9 @@ async function preparePhoto(data: string | null) {
 }
 
 export async function saveMyProfile(user: SessionUser, raw: unknown, currentToken: string | null): Promise<{ user: MyProfileDTO; passwordChanged: boolean }> {
+  if (isReadOnly(user.role)) {
+    throw new ApiError(403, "Conta de visualização (somente leitura) não pode alterar perfil ou senha.");
+  }
   const data = myProfileSchema.parse(raw);
   const photo = data.photoData === undefined ? {} : await preparePhoto(data.photoData);
   return db.transaction(async (tx) => {

@@ -5,7 +5,7 @@ import { accessProfiles, sessions, users } from "@/db/schema";
 import { ApiError, pgCode } from "@/lib/api";
 import { assertAdmin, lockAccess, resolveRole } from "@/lib/access-control";
 import { roleInput } from "@/lib/account-service";
-import { ACTION_LABEL, type Action, type SessionUser } from "@/lib/domain";
+import { ACTION_LABEL, isAnyAdmin, isMasterAdmin, type Action, type SessionUser } from "@/lib/domain";
 
 const schema = z.object({
   name: z.string().trim().min(2, "Informe o nome do perfil.").max(40),
@@ -16,7 +16,7 @@ const schema = z.object({
 const patch = z.object({ id: z.number().int().positive() }).merge(schema.partial());
 
 export async function createProfile(user: SessionUser, raw: unknown) {
-  assertAdmin(user);
+  assertAdmin(user, "admin_perfis");
   const data = schema.parse(raw);
   try {
     const [p] = await db.insert(accessProfiles).values(data).returning({ id: accessProfiles.id });
@@ -25,7 +25,7 @@ export async function createProfile(user: SessionUser, raw: unknown) {
 }
 
 export async function updateProfile(user: SessionUser, raw: unknown) {
-  assertAdmin(user);
+  assertAdmin(user, "admin_perfis");
   const { id, ...changes } = patch.parse(raw);
   if (!Object.keys(changes).length) return;
   try {
@@ -42,9 +42,12 @@ export async function updateProfile(user: SessionUser, raw: unknown) {
 
 /** Exclusão com transferência opcional, na mesma transação. Não transforma ninguém em admin por padrão. */
 export async function deleteProfile(user: SessionUser, id: number, replacement?: string | null) {
-  assertAdmin(user);
+  assertAdmin(user, "admin_perfis");
   const replacementRole = replacement ? roleInput.parse(replacement) : null;
   if (replacementRole === `custom:${id}`) throw new ApiError(400, "Escolha um perfil substituto diferente do que será excluído.");
+  if (replacementRole && isAnyAdmin(replacementRole) && !isMasterAdmin(user.role)) {
+    throw new ApiError(403, "Apenas o Administrador Master pode transferir usuários para administrador.");
+  }
   return db.transaction(async (tx) => {
     await lockAccess(tx);
     const [profile] = await tx.select().from(accessProfiles).where(and(eq(accessProfiles.id, id), isNull(accessProfiles.deletedAt))).for("update");

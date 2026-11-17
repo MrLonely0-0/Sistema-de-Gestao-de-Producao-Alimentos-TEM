@@ -1,9 +1,9 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import { Check, Minus, Plus, ShieldCheck } from "lucide-react";
-import type { BatchDTO, ProductDTO, StockRowDTO } from "@/lib/domain";
-import { api, errMsg, fmtInt, packLabel } from "@/lib/client";
+import { Check, Clock, Minus, Plus, ShieldCheck } from "lucide-react";
+import { finishOrderError, missingForFinish, type BatchDTO, type ProductDTO, type StockRowDTO } from "@/lib/domain";
+import { api, errMsg, fmtDuration, fmtInt, fromLocalInput, packLabel, toLocalInput } from "@/lib/client";
 import { Button, cn, ErrorNote, Field, inputCls, Modal, ProductTag, SectionTitle } from "@/components/ui";
 
 const onlyDigits = (v: string) => v.replace(/\D/g, "").slice(0, 7);
@@ -70,14 +70,24 @@ function Stepper({
   );
 }
 
+function ReadOnlyNotice() {
+  return (
+    <p className="rounded-lg border border-qual/30 bg-qual-soft px-3 py-2 text-xs font-medium text-qual">
+      Modo visualização (somente leitura): você pode testar os campos para demonstração, mas não é possível salvar ou confirmar.
+    </p>
+  );
+}
+
 /* ───────────── Etapa 2 · Liberar ───────────── */
 
 export function ReleaseDialog({
   batch,
+  readOnly = false,
   onClose,
   onDone,
 }: {
   batch: BatchDTO;
+  readOnly?: boolean;
   onClose: () => void;
   onDone: (message: string) => void;
 }) {
@@ -85,6 +95,7 @@ export function ReleaseDialog({
   const [error, setError] = useState<string | null>(null);
 
   async function confirm() {
+    if (readOnly) return;
     setBusy(true);
     setError(null);
     try {
@@ -107,13 +118,14 @@ export function ReleaseDialog({
           <Button variant="ghost" onClick={onClose} disabled={busy}>
             Cancelar
           </Button>
-          <Button variant="ok" loading={busy} onClick={confirm} icon={<ShieldCheck aria-hidden className="size-4" />}>
+          <Button variant="ok" loading={busy} disabled={readOnly} onClick={confirm} icon={<ShieldCheck aria-hidden className="size-4" />}>
             Liberar e carimbar
           </Button>
         </>
       }
     >
       <div className="space-y-4">
+        {readOnly && <ReadOnlyNotice />}
         <BatchHeadline batch={batch} />
         <p className="text-sm leading-relaxed text-ink-2">
           Ao confirmar, o sistema grava a <strong className="text-ink">data e a hora exatas</strong> da liberação, com o
@@ -150,11 +162,13 @@ const REASON_COPY = {
 export function ReasonDialog({
   batch,
   action,
+  readOnly = false,
   onClose,
   onDone,
 }: {
   batch: BatchDTO;
   action: "reter" | "devolver";
+  readOnly?: boolean;
   onClose: () => void;
   onDone: (message: string) => void;
 }) {
@@ -165,6 +179,7 @@ export function ReasonDialog({
 
   async function submit(e: FormEvent) {
     e.preventDefault();
+    if (readOnly) return;
     setBusy(true);
     setError(null);
     try {
@@ -192,7 +207,7 @@ export function ReasonDialog({
             form="reason-form"
             variant={action === "reter" ? "danger" : "primary"}
             loading={busy}
-            disabled={reason.trim().length < 3}
+            disabled={readOnly || reason.trim().length < 3}
           >
             {copy.confirm}
           </Button>
@@ -200,6 +215,7 @@ export function ReasonDialog({
       }
     >
       <form id="reason-form" onSubmit={submit} className="space-y-4">
+        {readOnly && <ReadOnlyNotice />}
         <BatchHeadline batch={batch} />
         <Field label={copy.label} hint={copy.help}>
           <textarea
@@ -222,11 +238,13 @@ export function ReasonDialog({
 export function FinishDialog({
   batch,
   products,
+  readOnly = false,
   onClose,
   onDone,
 }: {
   batch: BatchDTO;
   products: ProductDTO[];
+  readOnly?: boolean;
   onClose: () => void;
   onDone: (message: string) => void;
 }) {
@@ -239,8 +257,15 @@ export function FinishDialog({
   );
   // Mapa embalagem → quantidade digitada. Com uma única opção, já vem marcada.
   const [qty, setQty] = useState<Record<number, string>>(() => (options.length === 1 ? { [options[0].id]: "" } : {}));
-  const [busy, setBusy] = useState(false);
+  const [finishStart, setFinishStart] = useState(() => toLocalInput(batch.finishStart ?? null));
+  const [finishEnd, setFinishEnd] = useState(() => toLocalInput(batch.finishEnd ?? null));
+  const [busy, setBusy] = useState<"save" | "finish" | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const finishStartIso = fromLocalInput(finishStart);
+  const finishEndIso = fromLocalInput(finishEnd);
+  const timeError = finishOrderError({ finishStart: finishStartIso, finishEnd: finishEndIso });
+  const missingTimes = missingForFinish({ finishStart: finishStartIso, finishEnd: finishEndIso });
 
   const good = batch.goodUnits ?? 0;
   const lines = options.filter((o) => o.id in qty).map((o) => ({ option: o, boxes: parseInt(qty[o.id], 10) || 0 }));
@@ -248,7 +273,8 @@ export function FinishDialog({
   const left = good - used;
   const totalBoxes = lines.reduce((acc, l) => acc + l.boxes, 0);
   const atLimit = lines.length >= maxOutputs;
-  const ready = lines.length > 0 && lines.every((l) => l.boxes > 0) && left >= 0;
+  const canSaveTimes = !readOnly && !timeError;
+  const ready = !readOnly && !timeError && missingTimes.length === 0 && lines.length > 0 && lines.every((l) => l.boxes > 0) && left >= 0;
 
   function toggle(id: number) {
     setQty((cur) => {
@@ -265,42 +291,123 @@ export function FinishDialog({
     setQty((cur) => ({ ...cur, [id]: String(Math.max(0, Math.floor((good - others) / unitsPerBox))) }));
   }
 
+  async function saveTimes() {
+    if (!canSaveTimes) return;
+    setBusy("save");
+    setError(null);
+    try {
+      await api(`/api/batches/${batch.id}`, {
+        method: "PATCH",
+        body: { finishStart: finishStartIso, finishEnd: finishEndIso },
+      });
+      onDone(`Horários de acabamento da batelada #${batch.number} salvos.`);
+    } catch (err) {
+      setError(errMsg(err));
+      setBusy(null);
+    }
+  }
+
   async function submit(e: FormEvent) {
     e.preventDefault();
     if (!ready) return;
-    setBusy(true);
+    setBusy("finish");
     setError(null);
     try {
       await api(`/api/batches/${batch.id}/transition`, {
         method: "POST",
-        body: { action: "finalizar", outputs: lines.map((l) => ({ packagingOptionId: l.option.id, boxes: l.boxes })) },
+        body: {
+          action: "finalizar",
+          finishStart: finishStartIso,
+          finishEnd: finishEndIso,
+          outputs: lines.map((l) => ({ packagingOptionId: l.option.id, boxes: l.boxes })),
+        },
       });
       onDone(`Batelada #${batch.number} finalizada: ${fmtInt(totalBoxes)} caixas no estoque.`);
     } catch (err) {
       setError(errMsg(err));
-      setBusy(false);
+      setBusy(null);
     }
   }
 
   return (
     <Modal
       eyebrow="Acabamento"
-      title="Definir caixas geradas"
+      title="Definir caixas e acabamento"
       onClose={onClose}
       width="max-w-2xl"
       footer={
         <>
-          <Button variant="ghost" onClick={onClose} disabled={busy}>
+          <Button variant="ghost" onClick={onClose} disabled={busy !== null} className="mr-auto">
             Cancelar
           </Button>
-          <Button type="submit" form="finish-form" loading={busy} disabled={!ready}>
+          <Button variant="outline" loading={busy === "save"} disabled={!canSaveTimes || busy !== null} onClick={() => void saveTimes()}>
+            Salvar horários
+          </Button>
+          <Button type="submit" form="finish-form" loading={busy === "finish"} disabled={!ready || busy !== null}>
             Finalizar e enviar ao estoque
           </Button>
         </>
       }
     >
       <form id="finish-form" onSubmit={submit} className="space-y-5">
+        {readOnly && <ReadOnlyNotice />}
         <BatchHeadline batch={batch} />
+
+        <div>
+          <SectionTitle
+            aside={
+              <span className={cn("tnum text-xs", timeError ? "font-semibold text-stop" : "text-ink-3")}>
+                {timeError
+                  ? "Fim anterior ao início"
+                  : finishStartIso && finishEndIso
+                    ? `Duração: ${fmtDuration(finishStartIso, finishEndIso)}`
+                    : ""}
+              </span>
+            }
+          >
+            1 · Horários do acabamento
+          </SectionTitle>
+          <fieldset className={cn("rounded-lg border bg-card p-3", timeError ? "border-stop" : "border-line")}>
+            <legend className="sr-only">Acabamento</legend>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {([
+                ["Início", "finishStart", finishStart, setFinishStart],
+                ["Fim", "finishEnd", finishEnd, setFinishEnd],
+              ] as const).map(([label, key, value, setter]) => (
+                <div key={key}>
+                  <label htmlFor={`f-${key}`} className="mb-1 block text-xs font-semibold text-ink-2">
+                    {label}
+                    <span className="sr-only"> de acabamento</span>
+                  </label>
+                  <div className="flex gap-1.5">
+                    <input
+                      id={`f-${key}`}
+                      type="datetime-local"
+                      className={cn(inputCls, "tnum px-2")}
+                      value={value}
+                      onChange={(e) => setter(e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setter(toLocalInput(new Date().toISOString()))}
+                      className="flex h-11 shrink-0 items-center gap-1 rounded-lg border border-ink/25 bg-white px-2.5 text-xs font-bold text-ink transition hover:border-ink"
+                      aria-label={`Usar a hora atual em ${label.toLowerCase()} de acabamento`}
+                    >
+                      <Clock aria-hidden className="size-3.5" />
+                      Agora
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </fieldset>
+          {missingTimes.length > 0 && !timeError && (
+            <p className="mt-2 rounded-lg bg-acab-soft px-3 py-2 text-xs text-acab">
+              <span className="font-bold">Pode salvar os horários agora e finalizar depois.</span> Para concluir o acabamento ainda falta:{" "}
+              {missingTimes.join(", ").toLowerCase()}.
+            </p>
+          )}
+        </div>
 
         {options.length === 0 ? (
           <ErrorNote>
@@ -311,7 +418,7 @@ export function FinishDialog({
           <>
             <div>
               <SectionTitle aside={<span className="text-xs text-ink-3">{lines.length} de {maxOutputs} escolhidas</span>}>
-                1 · Embalagens de saída
+                2 · Embalagens de saída
               </SectionTitle>
               <div className="flex flex-wrap gap-2">
                 {options.map((o) => {
@@ -346,7 +453,7 @@ export function FinishDialog({
             </div>
 
             <div>
-              <SectionTitle>2 · Quantidade produzida de cada uma</SectionTitle>
+              <SectionTitle>3 · Quantidade produzida de cada uma</SectionTitle>
               {lines.length === 0 ? (
                 <p className="rounded-lg border border-dashed border-ink/25 px-3 py-5 text-center text-sm text-ink-3">
                   Escolha ao menos uma embalagem acima.
@@ -421,10 +528,12 @@ export function FinishDialog({
 
 export function ShipDialog({
   stock,
+  readOnly = false,
   onClose,
   onDone,
 }: {
   stock: StockRowDTO[];
+  readOnly?: boolean;
   onClose: () => void;
   onDone: (message: string) => void;
 }) {
@@ -439,7 +548,7 @@ export function ShipDialog({
   const item = available.find((s) => s.packagingOptionId === optionId);
   const n = parseInt(boxes, 10) || 0;
   const over = item ? n > item.balance : false;
-  const ready = !!item && n > 0 && !over && orderRef.trim().length > 0;
+  const ready = !readOnly && !!item && n > 0 && !over && orderRef.trim().length > 0;
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -476,6 +585,7 @@ export function ShipDialog({
       }
     >
       <form id="ship-form" onSubmit={submit} className="space-y-5">
+        {readOnly && <ReadOnlyNotice />}
         <fieldset>
           <legend className="mb-2.5 text-[11px] font-bold uppercase tracking-[0.14em] text-ink-3">Item do estoque</legend>
           <div className="space-y-1.5">

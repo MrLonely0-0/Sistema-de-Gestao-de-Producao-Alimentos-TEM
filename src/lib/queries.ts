@@ -17,6 +17,7 @@ import {
   users,
 } from "@/db/schema";
 import { loadColumns } from "@/lib/columns";
+import { normalizeAdminLimits } from "@/lib/auth";
 import { tagLegacyDemo } from "@/lib/demo-service";
 import { getInventoryRows } from "@/lib/inventory-queries";
 import { accessProfiles } from "@/db/schema";
@@ -329,7 +330,7 @@ export async function getAdminOverview(): Promise<AdminOverviewDTO> {
       .limit(15),
     db.select({ n: count() }).from(batches).where(isNotNull(batches.driveFolderId)),
     db.select({ batchId: attachments.batchId, n: count() }).from(attachments).groupBy(attachments.batchId),
-    db.select({ allowMultiFormatBatch: appState.allowMultiFormatBatch }).from(appState).where(eq(appState.id, "lifecycle")),
+    db.select({ allowMultiFormatBatch: appState.allowMultiFormatBatch, adminLimits: appState.adminLimits }).from(appState).where(eq(appState.id, "lifecycle")),
   ]);
   const perBatch = new Map(attachmentCounts.map((a) => [a.batchId, a.n]));
 
@@ -357,6 +358,7 @@ export async function getAdminOverview(): Promise<AdminOverviewDTO> {
     dimensions: catalog.dimensions,
     columns,
     allowMultiFormatBatch: stateRows[0]?.allowMultiFormatBatch ?? true,
+    adminLimits: normalizeAdminLimits(stateRows[0]?.adminLimits),
     drive: {
       mode: DRIVE_MODE,
       root: DRIVE_ROOT,

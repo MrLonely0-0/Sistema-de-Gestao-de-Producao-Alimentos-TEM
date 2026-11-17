@@ -34,6 +34,7 @@ export function SplashProvider({ branding, imageDataUrl, children }: {
   const seq = useRef(0);
   const route = useRef(pathname);
   const fadeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const frameFallback = useRef<ReturnType<typeof setTimeout> | null>(null);
   const frame1 = useRef<number | null>(null);
   const frame2 = useRef<number | null>(null);
   const navigation = useRef<Release | null>(null);
@@ -48,28 +49,37 @@ export function SplashProvider({ branding, imageDataUrl, children }: {
 
   const cancelExit = useCallback(() => {
     if (fadeTimer.current !== null) clearTimeout(fadeTimer.current);
+    if (frameFallback.current !== null) clearTimeout(frameFallback.current);
     if (frame1.current !== null) cancelAnimationFrame(frame1.current);
     if (frame2.current !== null) cancelAnimationFrame(frame2.current);
     fadeTimer.current = null;
+    frameFallback.current = null;
     frame1.current = null;
     frame2.current = null;
   }, []);
 
+  const startLeaving = useCallback(() => {
+    if (gates.current.size > 0 || phaseRef.current === "hidden") return;
+    if (frame1.current !== null) { cancelAnimationFrame(frame1.current); frame1.current = null; }
+    if (frame2.current !== null) { cancelAnimationFrame(frame2.current); frame2.current = null; }
+    if (frameFallback.current !== null) { clearTimeout(frameFallback.current); frameFallback.current = null; }
+    setSlow(false);
+    changePhase("leaving");
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    fadeTimer.current = setTimeout(() => {
+      if (gates.current.size === 0) changePhase("hidden");
+    }, reduced ? 100 : SPLASH_FADE_MS);
+  }, [changePhase]);
+
   const finishWhenIdle = useCallback(() => {
     if (gates.current.size > 0 || phaseRef.current === "hidden") return;
     cancelExit();
+    // Fallback para abas em segundo plano ou navegadores móveis onde requestAnimationFrame é pausado.
+    frameFallback.current = setTimeout(startLeaving, 200);
     frame1.current = requestAnimationFrame(() => {
-      frame2.current = requestAnimationFrame(() => {
-        if (gates.current.size > 0) return;
-        setSlow(false);
-        changePhase("leaving");
-        const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-        fadeTimer.current = setTimeout(() => {
-          if (gates.current.size === 0) changePhase("hidden");
-        }, reduced ? 100 : SPLASH_FADE_MS);
-      });
+      frame2.current = requestAnimationFrame(startLeaving);
     });
-  }, [cancelExit, changePhase]);
+  }, [cancelExit, startLeaving]);
 
   const hold = useCallback((): Release => {
     const id = ++seq.current;

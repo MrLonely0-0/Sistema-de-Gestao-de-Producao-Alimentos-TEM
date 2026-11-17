@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { boolean, index, integer, jsonb, pgTable, serial, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
-import type { Action, AttachmentKind, ColumnFeature, Role, Status } from "../lib/domain";
+import type { Action, AdminLimits, AttachmentKind, ColumnFeature, Role, Status } from "../lib/domain";
 
 const ts = (name: string) => timestamp(name, { withTimezone: true });
 
@@ -145,6 +145,7 @@ export const appState = pgTable("app_state", {
   demoRemovedBatches: integer("demo_removed_batches").notNull().default(0),
   demoRemovedShipments: integer("demo_removed_shipments").notNull().default(0),
   allowMultiFormatBatch: boolean("allow_multi_format_batch").notNull().default(true),
+  adminLimits: jsonb("admin_limits").$type<AdminLimits>(),
 });
 
 export const sessions = pgTable("sessions", {

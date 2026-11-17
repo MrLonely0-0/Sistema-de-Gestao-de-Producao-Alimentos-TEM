@@ -6,6 +6,7 @@ import { z } from "zod";
 import { db, hasDatabaseUrl } from "@/db";
 import { siteBranding } from "@/db/schema";
 import { ApiError, pgCode } from "@/lib/api";
+import { assertAdmin } from "@/lib/access-control";
 import { BRAND_IMAGE_MAX_BYTES, BRAND_IMAGE_MAX_SIDE, brandAssetUrl, type BrandingInfo } from "@/lib/branding-shared";
 import type { SessionUser } from "@/lib/domain";
 
@@ -92,7 +93,7 @@ const uploadSchema = z.object({
 });
 
 export async function saveBranding(user: SessionUser, raw: unknown) {
-  if (user.role !== "admin") throw new ApiError(403, "Apenas o administrador pode alterar a identidade visual.");
+  assertAdmin(user, "admin_visual");
   const { name, imageData } = uploadSchema.parse(raw);
   const match = /^data:image\/png;base64,([A-Za-z0-9+/]+={0,2})$/.exec(imageData);
   if (!match) throw new ApiError(400, "Selecione o arquivo original em PNG.");
@@ -127,7 +128,7 @@ export async function saveBranding(user: SessionUser, raw: unknown) {
 }
 
 export async function deleteBranding(user: SessionUser) {
-  if (user.role !== "admin") throw new ApiError(403, "Apenas o administrador pode alterar a identidade visual.");
+  assertAdmin(user, "admin_visual");
   await db.delete(siteBranding).where(eq(siteBranding.id, KEY));
   return { ok: true };
 }

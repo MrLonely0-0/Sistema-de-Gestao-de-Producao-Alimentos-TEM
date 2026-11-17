@@ -9,7 +9,7 @@ import type { AdjustmentDTO, InventoryRowDTO, ShipmentDTO, StockManageDTO } from
 import { api, errMsg, fmtDateTime, fmtInt, packLabel } from "@/lib/client";
 import { DeleteInventoryDialog, InventoryItemDialog } from "@/components/inventory-item-dialog";
 import { useAuth } from "@/components/auth-provider";
-import { can } from "@/lib/domain";
+import { hasAdminCapability, isReadOnly, userCan } from "@/lib/domain";
 import { Button, cn, ErrorNote, Field, inputCls, Modal, SectionTitle, useToast } from "@/components/ui";
 
 type Dialog =
@@ -52,8 +52,9 @@ function Table({ headers, rows, empty }: { headers: string[]; rows: Array<Array<
 export function StockManager() {
   const toast = useToast();
   const user = useAuth();
-  const manage = can(user.role, "separar", user.permissions);
-  const admin = user.role === "admin";
+  const readOnly = isReadOnly(user.role);
+  const manage = readOnly || userCan(user, "separar");
+  const admin = readOnly || hasAdminCapability(user, "estoque_itens");
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(false);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
@@ -100,6 +101,7 @@ export function StockManager() {
   }
 
   async function submit(fn: () => Promise<unknown>, ok: string) {
+    if (readOnly) return;
     setBusy(true);
     setDialogError(null);
     try {
@@ -291,7 +293,7 @@ export function StockManager() {
           <InventoryItemDialog
             key={dialog.kind === "item-edit" ? dialog.item.id : "new"}
             item={dialog.kind === "item-edit" ? dialog.item : undefined}
-            data={data} busy={busy} error={dialogError}
+            data={data} readOnly={readOnly} busy={busy} error={dialogError}
             onClose={() => setDialog(null)}
             onSave={(body) => void submit(
               () => api("/api/stock/items", { method: dialog.kind === "item-edit" ? "PATCH" : "POST", body }),
@@ -300,7 +302,7 @@ export function StockManager() {
           />
         )}
         {admin && dialog?.kind === "item-delete" && (
-          <DeleteInventoryDialog item={dialog.item} busy={busy} error={dialogError} onClose={() => setDialog(null)}
+          <DeleteInventoryDialog item={dialog.item} readOnly={readOnly} busy={busy} error={dialogError} onClose={() => setDialog(null)}
             onConfirm={() => void submit(() => api("/api/stock/items", {
               method: "DELETE", body: { id: dialog.item.id, revision: dialog.item.revision },
             }), "Item excluído do estoque. Histórico preservado.")}
@@ -312,6 +314,7 @@ export function StockManager() {
             item={dialog.kind === "adjust-edit" ? dialog.item : undefined}
             options={options}
             initialOptionId={dialog.kind === "adjust" ? dialog.optionId : undefined}
+            readOnly={readOnly}
             busy={busy}
             error={dialogError}
             onClose={() => setDialog(null)}
@@ -331,6 +334,7 @@ export function StockManager() {
           <ShipmentDialog
             item={dialog.item}
             options={options}
+            readOnly={readOnly}
             busy={busy}
             error={dialogError}
             onClose={() => setDialog(null)}
@@ -351,6 +355,7 @@ export function StockManager() {
                 <Button
                   variant="danger"
                   loading={busy}
+                  disabled={readOnly}
                   onClick={() => {
                     const isAdjust = dialog.kind === "adjust-delete";
                     void submit(
@@ -397,6 +402,7 @@ function AdjustmentDialog({
   item,
   options,
   initialOptionId,
+  readOnly = false,
   busy,
   error,
   onClose,
@@ -405,6 +411,7 @@ function AdjustmentDialog({
   item?: AdjustmentDTO;
   options: Array<{ id: number; label: string; balance: number }>;
   initialOptionId?: number;
+  readOnly?: boolean;
   busy: boolean;
   error: string | null;
   onClose: () => void;
@@ -418,6 +425,7 @@ function AdjustmentDialog({
 
   function submit(e: FormEvent) {
     e.preventDefault();
+    if (readOnly) return;
     const n = Number(amount);
     if (!n) return;
     onSubmit({
@@ -436,11 +444,12 @@ function AdjustmentDialog({
       footer={
         <>
           <Button variant="ghost" onClick={onClose} disabled={busy}>Cancelar</Button>
-          <Button type="submit" form="adjust-form" loading={busy} disabled={!amount || Number(amount) < 1 || reason.trim().length < 3}>Salvar</Button>
+          <Button type="submit" form="adjust-form" loading={busy} disabled={readOnly || !amount || Number(amount) < 1 || reason.trim().length < 3}>Salvar</Button>
         </>
       }
     >
       <form id="adjust-form" onSubmit={submit} className="space-y-4">
+        {readOnly && <p className="rounded-lg bg-qual-soft px-3 py-2 text-xs font-medium text-qual">Modo visualização (somente leitura): alterações não podem ser salvas.</p>}
         <Field label="Embalagem / item">
           <select className={inputCls} value={optionId} disabled={!!item} onChange={(e) => setOptionId(Number(e.target.value))}>
             {options.map((o) => (
@@ -480,6 +489,7 @@ function AdjustmentDialog({
 function ShipmentDialog({
   item,
   options,
+  readOnly = false,
   busy,
   error,
   onClose,
@@ -487,6 +497,7 @@ function ShipmentDialog({
 }: {
   item: ShipmentDTO;
   options: Array<{ id: number; label: string; balance: number }>;
+  readOnly?: boolean;
   busy: boolean;
   error: string | null;
   onClose: () => void;
@@ -509,9 +520,9 @@ function ShipmentDialog({
           <Button
             loading={busy}
             onClick={() =>
-              onSubmit({ boxes: Number(boxes), orderRef, customer, ...(optionId ? { packagingOptionId: optionId } : {}) })
+              !readOnly && onSubmit({ boxes: Number(boxes), orderRef, customer, ...(optionId ? { packagingOptionId: optionId } : {}) })
             }
-            disabled={Number(boxes) < 1 || !orderRef.trim()}
+            disabled={readOnly || Number(boxes) < 1 || !orderRef.trim()}
           >
             Salvar
           </Button>
@@ -519,6 +530,7 @@ function ShipmentDialog({
       }
     >
       <div className="space-y-4">
+        {readOnly && <p className="rounded-lg bg-qual-soft px-3 py-2 text-xs font-medium text-qual">Modo visualização (somente leitura): alterações não podem ser salvas.</p>}
         <Field label="Item (deixe como está para não trocar)" optional>
           <select className={inputCls} value={optionId} onChange={(e) => setOptionId(Number(e.target.value))}>
             <option value="">Manter: {item.brand} {item.format} · {item.label}</option>

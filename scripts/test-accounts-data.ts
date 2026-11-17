@@ -7,7 +7,7 @@ import sharp from "sharp";
 import { db, pool } from "../src/db";
 import * as S from "../src/db/schema";
 import { ApiError } from "../src/lib/api";
-import { ensureAnotherAdmin } from "../src/lib/access-control";
+import { ensureAnotherMasterAdmin } from "../src/lib/access-control";
 import { clearDemoInTransaction, demoPreviewInTransaction } from "../src/lib/demo-service";
 import { stockBalance } from "../src/lib/inventory-ledger";
 import { ensureReady } from "../src/lib/seed";
@@ -31,10 +31,10 @@ class Rollback extends Error {}
 async function main() {
   const salt = randomBytes(16).toString("hex");
   const adminEmail = `admin-${suffix}@account.test`;
-  const [admin] = await db.insert(S.users).values({ name: "Validação contas", email: adminEmail, role: "admin", passwordHash: `scrypt$${salt}$${scryptSync(oldPassword, salt, 64).toString("hex")}` }).returning();
+  const [admin] = await db.insert(S.users).values({ name: "Validação contas", email: adminEmail, role: "admin_master", passwordHash: `scrypt$${salt}$${scryptSync(oldPassword, salt, 64).toString("hex")}` }).returning();
   users.push(admin.id);
   const token = await login(adminEmail, oldPassword);
-  const actor: SessionUser = { id: admin.id, name: admin.name, email: adminEmail, role: "admin" };
+  const actor: SessionUser = { id: admin.id, name: admin.name, email: adminEmail, role: "admin_master" };
   const profileName = `Apoio-${suffix}`;
   const profile = await call<{ id: number }>("/api/admin/profiles", token, "POST", { name: profileName, permissions: ["criar"] }); profiles.push(profile.id);
   const initialEmail = `worker-${suffix}@account.test`;
@@ -115,11 +115,11 @@ async function main() {
   assert.notEqual(another.id, created.id);
   ok("Excluir usuário bloqueia o acesso, preserva autoria e libera e-mail para outra conta sem herdar sessões");
 
-  // Proteção ao último administrador, sem efetivar mudanças nas contas reais.
+  // Proteção ao último administrador master, sem efetivar mudanças nas contas reais.
   try {
     await db.transaction(async (tx) => {
-      await tx.update(S.users).set({ active: false }).where(and(eq(S.users.role, "admin"), ne(S.users.id, admin.id), isNull(S.users.deletedAt)));
-      await assert.rejects(() => ensureAnotherAdmin(tx, admin.id), (e: unknown) => e instanceof ApiError && e.status === 409);
+      await tx.update(S.users).set({ active: false }).where(and(eq(S.users.role, "admin_master"), ne(S.users.id, admin.id), isNull(S.users.deletedAt)));
+      await assert.rejects(() => ensureAnotherMasterAdmin(tx, admin.id), (e: unknown) => e instanceof ApiError && e.status === 409);
       throw new Rollback();
     });
   } catch (e) { if (!(e instanceof Rollback)) throw e; }

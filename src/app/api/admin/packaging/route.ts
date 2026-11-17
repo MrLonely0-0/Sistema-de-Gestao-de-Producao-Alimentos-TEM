@@ -16,7 +16,7 @@ const createSchema = z.object({
 const updateSchema = z.object({ id: z.number().int().positive(), active: z.boolean() });
 
 export const POST = handle(async (req) => {
-  await requireAdmin(req);
+  await requireAdmin(req, "admin_produtos");
   const data = await readBody(req, createSchema);
   const [product] = await db.select({ id: products.id }).from(products).where(eq(products.id, data.productId));
   if (!product) throw new ApiError(404, "Produto não encontrado.");
@@ -32,7 +32,7 @@ export const POST = handle(async (req) => {
 // A quantidade por caixa não é editável de propósito: mudaria o significado do
 // estoque já produzido. Para corrigir, desative e cadastre outra.
 export const PATCH = handle(async (req) => {
-  await requireAdmin(req);
+  await requireAdmin(req, "admin_produtos");
   const { id, active } = await readBody(req, updateSchema);
   const [row] = await db
     .update(packagingOptions)
@@ -44,7 +44,7 @@ export const PATCH = handle(async (req) => {
 });
 
 export const DELETE = handle(async (req) => {
-  await requireAdmin(req);
+  await requireAdmin(req, "admin_produtos");
   const id = parseId(req.nextUrl.searchParams.get("id") ?? "");
   try {
     await db.delete(packagingOptions).where(eq(packagingOptions.id, id));

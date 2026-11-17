@@ -3,6 +3,7 @@ import { z } from "zod";
 import { db } from "@/db";
 import { kanbanColumns } from "@/db/schema";
 import { ApiError } from "@/lib/api";
+import { assertAdmin } from "@/lib/access-control";
 import {
   ACCENTS,
   COLUMN_FEATURES,
@@ -31,7 +32,7 @@ export const updateColumnSchema = z.object({ id: z.number().int().positive() }).
 export const orderSchema = z.object({ order: z.array(z.number().int().positive()).min(1) });
 
 function adminOnly(user: SessionUser) {
-  if (user.role !== "admin") throw new ApiError(403, "Somente o administrador pode configurar os painéis.");
+  assertAdmin(user, "admin_paineis");
 }
 
 async function others(tx: Tx, exceptId?: number) {

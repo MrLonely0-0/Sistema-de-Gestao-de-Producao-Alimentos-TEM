@@ -3,6 +3,7 @@ import { z } from "zod";
 import { db } from "@/db";
 import { inventoryItems, packagingOptions, products, stockAdjustments } from "@/db/schema";
 import { ApiError } from "@/lib/api";
+import { assertAdmin } from "@/lib/access-control";
 import {
   ensureInventoryItems, lockStockOptions, requireLiveStock, stockBalance, touchStock, type InventoryTx,
 } from "@/lib/inventory-ledger";
@@ -28,7 +29,7 @@ const editSchema = metadata.extend({
 const deleteSchema = z.object({ id, revision: z.number().int().min(1) });
 
 function admin(user: SessionUser) {
-  if (user.role !== "admin") throw new ApiError(403, "Só o administrador pode criar, editar ou excluir itens de estoque.");
+  assertAdmin(user, "estoque_itens");
 }
 
 /** Ledger imutável para cadastro, edição do saldo e exclusão: não se confunde com ajuste manual editável. */

@@ -6,7 +6,7 @@ import { appState, batches, batchEvents, batchOutputs, inventoryItems, packaging
 import { ApiError } from "@/lib/api";
 import { assertAdmin } from "@/lib/access-control";
 import { ensureInventoryItems, lockStockOptions, stockBalance, type InventoryTx } from "@/lib/inventory-ledger";
-import type { DataMaintenanceDTO, SessionUser } from "@/lib/domain";
+import { isReadOnly, type DataMaintenanceDTO, type SessionUser } from "@/lib/domain";
 
 const KEY = "lifecycle";
 
@@ -90,7 +90,7 @@ export async function demoPreviewInTransaction(tx: InventoryTx): Promise<DataMai
 }
 
 export async function getDemoOverview(user: SessionUser) {
-  assertAdmin(user);
+  if (!isReadOnly(user.role)) assertAdmin(user, "admin_dados");
   await tagLegacyDemo();
   await ensureInventoryItems();
   return db.transaction((tx) => demoPreviewInTransaction(tx), { isolationLevel: "repeatable read", accessMode: "read only" });
@@ -98,7 +98,7 @@ export async function getDemoOverview(user: SessionUser) {
 
 /** Exportada para testes transacionais com rollback; produção usa clearDemo abaixo. */
 export async function clearDemoInTransaction(tx: InventoryTx, user: SessionUser, version: string) {
-  assertAdmin(user);
+  assertAdmin(user, "admin_dados");
   await tx.execute(sql`select pg_advisory_xact_lock(7405101)`);
   const demo = await tx.select().from(batches).where(eq(batches.isDemo, true)).orderBy(asc(batches.id)).for("update");
   const firstShipments = await tx.select().from(shipments).where(eq(shipments.isDemo, true)).orderBy(asc(shipments.id));
@@ -133,7 +133,7 @@ export async function clearDemoInTransaction(tx: InventoryTx, user: SessionUser,
 }
 
 export async function clearDemo(user: SessionUser, raw: unknown) {
-  assertAdmin(user);
+  assertAdmin(user, "admin_dados");
   const input = z.object({ confirmation: z.literal("LIMPAR DEMONSTRAÇÃO", { error: "Digite LIMPAR DEMONSTRAÇÃO para confirmar." }), version: z.string().length(64) }).strict().parse(raw);
   await tagLegacyDemo();
   await ensureInventoryItems();

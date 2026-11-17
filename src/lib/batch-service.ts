@@ -14,19 +14,24 @@ import {
   shipments,
 } from "@/db/schema";
 import { ApiError } from "@/lib/api";
+import { assertAdmin } from "@/lib/access-control";
 import { ensureInventoryItems, lockStockOptions, receiveProduction, requireLiveStock, stockBalance, touchStock } from "@/lib/inventory-ledger";
 import { assertFeature } from "@/lib/columns";
 import { createBatchFolder } from "@/lib/drive";
 import {
   ATTACHMENT_KINDS,
   type ColumnFeature,
-  can,
-  canAttach,
   FAMILY_SLUG,
+  finishOrderError,
+  hasAdminCapability,
+  missingForFinish,
   missingForReady,
+  ROLE_LABEL,
   STATUS_LABEL,
   timeOrderErrors,
   TRANSITIONS,
+  userCan,
+  userCanAttach,
   type Action,
   type ProductionData,
   type SessionUser,
@@ -73,6 +78,11 @@ const productionSchema = z.object({
   markReady: z.boolean().optional(),
 });
 
+const finishTimesSchema = z.object({
+  finishStart: optionalTime,
+  finishEnd: optionalTime,
+});
+
 const createSchema = productionSchema
   .extend({
     productId: z.number().int().positive().optional(),
@@ -96,6 +106,8 @@ const transitionSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("devolver"), reason: reason("devolução") }),
   z.object({
     action: z.literal("finalizar"),
+    finishStart: optionalTime.optional(),
+    finishEnd: optionalTime.optional(),
     outputs: z
       .array(
         z.object({
@@ -134,7 +146,7 @@ const shipmentSchema = z.object({
 /* ───────────── Auxiliares ───────────── */
 
 function assertCan(user: SessionUser, action: Action) {
-  if (!can(user.role, action, user.permissions)) throw new ApiError(403, "Seu perfil não tem permissão para esta ação.");
+  if (!userCan(user, action)) throw new ApiError(403, "Seu perfil não tem permissão para esta ação.");
 }
 
 function assertConsistent(data: ProductionData) {
@@ -184,7 +196,8 @@ function weightOf(format: string): number {
 export async function createBatch(user: SessionUser, raw: unknown): Promise<{ id: number; number: number }> {
   assertCan(user, "criar");
   await assertFeature("criar", "em_preparo");
-  const { productId, productIds: rawIds, markReady, ...data } = createSchema.parse(raw);
+  const { productId, productIds: rawIds, markReady, finishStart: _fs, finishEnd: _fe, ...rest } = createSchema.parse(raw);
+  const data = { ...rest, finishStart: null, finishEnd: null };
   const requestedIds = [...new Set(rawIds ?? (productId !== undefined ? [productId] : []))];
   assertConsistent(data);
   if (markReady) {
@@ -286,26 +299,44 @@ export async function createBatch(user: SessionUser, raw: unknown): Promise<{ id
 }
 
 export async function updateBatch(user: SessionUser, id: number, raw: unknown): Promise<void> {
-  assertCan(user, "editar");
-  await assertFeature("editar", "em_preparo");
-  const { markReady, ...data } = productionSchema.parse(raw);
-  assertConsistent(data);
-  if (markReady) {
-    await assertFeature("marcar_pronto", "em_preparo");
-    assertReady(data);
-  }
-
   await db.transaction(async (tx) => {
     const [batch] = await tx.select().from(batches).where(eq(batches.id, id)).for("update");
     if (!batch || batch.deletedAt) throw new ApiError(404, "Batelada não encontrada.");
+
+    if (batch.status === "liberado") {
+      assertCan(user, "finalizar");
+      await assertFeature("finalizar", "liberado");
+      const { finishStart, finishEnd } = finishTimesSchema.parse(raw);
+      const err = finishOrderError({ finishStart, finishEnd });
+      if (err) throw new ApiError(400, err);
+      const now = new Date();
+      await tx
+        .update(batches)
+        .set({ finishStart, finishEnd, ...audit(user, now) })
+        .where(eq(batches.id, id));
+      await logEvent(tx, id, "acabamento", "Horários de acabamento atualizados.", user);
+      return;
+    }
+
     if (batch.status !== "em_preparo") {
       throw new ApiError(409, `Esta batelada já está "${STATUS_LABEL[batch.status]}" e não pode mais ser editada.`);
     }
+
+    assertCan(user, "editar");
+    await assertFeature("editar", "em_preparo");
+    const { markReady, finishStart: _fs, finishEnd: _fe, ...rest } = productionSchema.parse(raw);
+    const data = { ...rest, finishStart: batch.finishStart, finishEnd: batch.finishEnd };
+    assertConsistent(data);
+    if (markReady) {
+      await assertFeature("marcar_pronto", "em_preparo");
+      assertReady(data);
+    }
+
     const now = new Date();
     await tx
       .update(batches)
       .set({
-        ...data,
+        ...rest,
         ...audit(user, now),
         ...(markReady ? { status: "pronto" as const, readyAt: now, qualityNote: null, heldAt: null } : {}),
       })
@@ -378,6 +409,15 @@ export async function transitionBatch(user: SessionUser, id: number, raw: unknow
         break;
       }
       case "finalizar": {
+        const finishStart = payload.finishStart !== undefined ? payload.finishStart : batch.finishStart;
+        const finishEnd = payload.finishEnd !== undefined ? payload.finishEnd : batch.finishEnd;
+        const finishErr = finishOrderError({ finishStart, finishEnd });
+        if (finishErr) throw new ApiError(400, finishErr);
+        const missingFinish = missingForFinish({ finishStart, finishEnd });
+        if (missingFinish.length > 0) {
+          throw new ApiError(422, `Para finalizar o acabamento, complete: ${missingFinish.join(", ")}.`);
+        }
+
         const ids = payload.outputs.map((o) => o.packagingOptionId);
         if (new Set(ids).size !== ids.length) {
           throw new ApiError(400, "Cada embalagem só pode ser escolhida uma vez.");
@@ -421,7 +461,14 @@ export async function transitionBatch(user: SessionUser, id: number, raw: unknow
         );
         await tx
           .update(batches)
-          .set({ status: "em_estoque", finishedAt: now, finishedByName: user.name, ...audit(user, now) })
+          .set({
+            status: "em_estoque",
+            finishStart,
+            finishEnd,
+            finishedAt: now,
+            finishedByName: user.name,
+            ...audit(user, now),
+          })
           .where(eq(batches.id, id));
         // Produção e entrada no estoque confirmadas na MESMA transação.
         for (const line of lines) await receiveProduction(tx, line.option.id, user);
@@ -443,7 +490,7 @@ export async function transitionBatch(user: SessionUser, id: number, raw: unknow
 /* ───────────── Exclusão de batelada (somente admin) ───────────── */
 
 export async function deleteBatch(user: SessionUser, id: number): Promise<void> {
-  if (user.role !== "admin") throw new ApiError(403, "Somente o administrador pode excluir bateladas.");
+  assertAdmin(user, "excluir_bateladas");
   await assertFeature("excluir");
   await db.transaction(async (tx) => {
     const [batch] = await tx.select().from(batches).where(eq(batches.id, id)).for("update");
@@ -465,7 +512,7 @@ export async function deleteBatch(user: SessionUser, id: number): Promise<void> 
       tx,
       id,
       "excluida",
-      `Batelada #${batch.number} excluída do painel por ${user.name} (Administrador). Histórico preservado nos relatórios.`,
+      `Batelada #${batch.number} excluída do painel por ${user.name} (${ROLE_LABEL[user.role] ?? "Administrador"}). Histórico preservado nos relatórios.`,
       user,
     );
   });
@@ -478,7 +525,7 @@ export async function addAttachment(user: SessionUser, batchId: number, raw: unk
   await db.transaction(async (tx) => {
     const [batch] = await tx.select().from(batches).where(eq(batches.id, batchId)).for("update");
     if (!batch || batch.deletedAt) throw new ApiError(404, "Batelada não encontrada.");
-    if (!canAttach(user.role, batch.status, user.permissions)) {
+    if (!userCanAttach(user, batch.status)) {
       throw new ApiError(403, "Seu perfil não pode anexar arquivos a esta batelada nesta etapa.");
     }
     await assertFeature("anexar", batch.status);
@@ -495,8 +542,8 @@ export async function removeAttachment(user: SessionUser, batchId: number, attac
       .from(attachments)
       .where(and(eq(attachments.id, attachmentId), eq(attachments.batchId, batchId)));
     if (!row) throw new ApiError(404, "Anexo não encontrado.");
-    if (user.role !== "admin" && row.createdById !== user.id) {
-      throw new ApiError(403, "Só quem anexou (ou um administrador) pode remover este anexo.");
+    if (!hasAdminCapability(user, "excluir_bateladas") && row.createdById !== user.id) {
+      throw new ApiError(403, "Só quem anexou (ou um administrador autorizado) pode remover este anexo.");
     }
     await tx.delete(attachments).where(eq(attachments.id, attachmentId));
     await tx.update(batches).set({ updatedAt: new Date() }).where(eq(batches.id, batchId));

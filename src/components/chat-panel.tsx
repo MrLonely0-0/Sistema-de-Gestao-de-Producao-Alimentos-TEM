@@ -5,7 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Camera, Hash, ImagePlus, Lock, MessageSquare, Pencil, Plus, RefreshCw, Send, Settings2, Trash2, UserRound, Users, X } from "lucide-react";
 import { useAuth } from "@/components/auth-provider";
 import { UserAvatar } from "@/components/user-avatar";
-import { roleLabel, type ChatChannelDTO, type ChatDTO } from "@/lib/domain";
+import { hasAdminCapability, isReadOnly, roleLabel, type ChatChannelDTO, type ChatDTO } from "@/lib/domain";
 import { api, errMsg, fmtAgo, fmtDateTime } from "@/lib/client";
 import { Button, cn, ErrorNote, Field, inputCls, Modal, SectionTitle, useToast } from "@/components/ui";
 
@@ -66,7 +66,9 @@ export function ChatPanel() {
   const cameraRef = useRef<HTMLInputElement>(null);
   const galleryRef = useRef<HTMLInputElement>(null);
   const lastCount = useRef<number>(0);
-  const isAdmin = user.role === "admin";
+  const readOnly = isReadOnly(user.role);
+  const isAdmin = !readOnly && hasAdminCapability(user, "moderar_chat");
+  const showManage = isAdmin || readOnly;
 
   const load = useCallback(async (showSpinner = false) => {
     if (showSpinner) setError(null);
@@ -74,7 +76,7 @@ export function ChatPanel() {
       const res = await api<ChatDTO>(`/api/chat${selected ? `?channelId=${selected}` : ""}`);
       setData(res);
       setError(null);
-      if (selected) void api("/api/chat/read", { method: "POST", body: { channelId: selected } }).catch(() => {});
+      if (selected && !readOnly) void api("/api/chat/read", { method: "POST", body: { channelId: selected } }).catch(() => {});
       if (res.messages.length > lastCount.current && lastCount.current > 0 && selected) {
         const last = res.messages[res.messages.length - 1];
         if (last && last.authorName !== user.name) toast(`Nova mensagem de ${last.authorName}.`);
@@ -83,7 +85,7 @@ export function ChatPanel() {
     } catch (e) {
       if (showSpinner) setError(errMsg(e));
     }
-  }, [selected, toast, user.name]);
+  }, [selected, toast, user.name, readOnly]);
 
   useEffect(() => {
     if (data && selected === null) setSelected(data.activeChannelId);
@@ -111,7 +113,7 @@ export function ChatPanel() {
   }
 
   async function send() {
-    if (!selected || (!text.trim() && !photo) || sending) return;
+    if (readOnly || !selected || (!text.trim() && !photo) || sending) return;
     setSending(true);
     try {
       await api("/api/chat", { method: "POST", body: { channelId: selected, content: text, imageData: photo?.data ?? null, imageName: photo?.name ?? null } });
@@ -166,7 +168,7 @@ export function ChatPanel() {
           </div>
           <div className="flex flex-wrap gap-2">
             <Button variant="hivis" icon={<UserRound aria-hidden className="size-4" />} onClick={() => setNewDirect(true)}>Conversa particular</Button>
-            {isAdmin && <Button variant="outline" icon={<Settings2 aria-hidden className="size-4" />} onClick={() => setManage(true)}>Gerenciar canais</Button>}
+            {showManage && <Button variant="outline" icon={<Settings2 aria-hidden className="size-4" />} onClick={() => setManage(true)}>Gerenciar canais</Button>}
             <Button variant="outline" aria-label="Atualizar conversa" onClick={() => void load(true)} icon={<RefreshCw aria-hidden className={cn("size-4", busy && "animate-spin")} />} />
           </div>
         </div>
@@ -250,7 +252,7 @@ export function ChatPanel() {
                           {m.editedAt && <span className="mt-1 block text-[10px] opacity-70">editada · {fmtDateTime(m.editedAt)}</span>}
                         </div>
                       )}
-                      {(m.canEdit || m.canDelete) && editing?.id !== m.id && (
+                      {!readOnly && (m.canEdit || m.canDelete) && editing?.id !== m.id && (
                         <div className={cn("mt-1 flex gap-1", mine && "justify-end")}>
                           {m.canEdit && <button type="button" aria-label={`Editar mensagem ${m.id}`} onClick={() => setEditing({ id: m.id, content: m.content })} className="rounded p-1 text-ink-3 hover:bg-ink/8 hover:text-ink"><Pencil aria-hidden className="size-3" /></button>}
                           {m.canDelete && <button type="button" aria-label={`Excluir mensagem ${m.id}`} onClick={() => setDeleting({ id: m.id })} className="rounded p-1 text-ink-3 hover:bg-stop-soft hover:text-stop"><Trash2 aria-hidden className="size-3" /></button>}
@@ -264,6 +266,11 @@ export function ChatPanel() {
             </div>
 
             <form className="shrink-0 border-t border-line bg-paper p-3" onSubmit={(e) => { e.preventDefault(); void send(); }}>
+              {readOnly && (
+                <p className="mb-2 rounded-lg bg-qual-soft px-3 py-2 text-xs font-medium text-qual">
+                  Modo visualização (somente leitura): envio, fotos, criação e moderação estão desabilitados.
+                </p>
+              )}
               {photo && (
                 <div className="mb-2 flex items-center gap-2 rounded-lg border border-line bg-card p-2">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -273,14 +280,14 @@ export function ChatPanel() {
                 </div>
               )}
               <label className="sr-only" htmlFor="chat-message">Mensagem</label>
-              <textarea id="chat-message" className={cn(inputCls, "h-20 resize-none py-2.5")} placeholder={selected ? `Mensagem para ${current?.name}…` : "Selecione um canal"} value={text} maxLength={4000} disabled={!selected} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void send(); } }} />
+              <textarea id="chat-message" className={cn(inputCls, "h-20 resize-none py-2.5")} placeholder={readOnly ? "Envio desabilitado no modo visualização" : selected ? `Mensagem para ${current?.name}…` : "Selecione um canal"} value={text} maxLength={4000} disabled={readOnly || !selected} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void send(); } }} />
               <input ref={cameraRef} type="file" accept="image/*" capture="environment" className="sr-only" aria-label="Tirar foto com a câmera" onChange={(e) => void pickPhoto(e.target.files?.[0])} />
               <input ref={galleryRef} type="file" accept="image/*" className="sr-only" aria-label="Anexar foto da galeria" onChange={(e) => void pickPhoto(e.target.files?.[0])} />
               <div className="mt-2 flex flex-wrap items-center gap-2">
-                <Button type="button" size="sm" variant="outline" disabled={!selected} onClick={() => cameraRef.current?.click()} icon={<Camera aria-hidden className="size-4" />}>Câmera</Button>
-                <Button type="button" size="sm" variant="outline" disabled={!selected} onClick={() => galleryRef.current?.click()} icon={<ImagePlus aria-hidden className="size-4" />}>Foto</Button>
+                <Button type="button" size="sm" variant="outline" disabled={readOnly || !selected} onClick={() => cameraRef.current?.click()} icon={<Camera aria-hidden className="size-4" />}>Câmera</Button>
+                <Button type="button" size="sm" variant="outline" disabled={readOnly || !selected} onClick={() => galleryRef.current?.click()} icon={<ImagePlus aria-hidden className="size-4" />}>Foto</Button>
                 <span className="hidden text-[11px] text-ink-3 sm:block">Enter envia · Shift+Enter quebra linha</span>
-                <Button type="submit" variant="hivis" className="ml-auto" loading={sending} disabled={!selected || (!text.trim() && !photo)} icon={<Send aria-hidden className="size-4" />}>Enviar</Button>
+                <Button type="submit" variant="hivis" className="ml-auto" loading={sending} disabled={readOnly || !selected || (!text.trim() && !photo)} icon={<Send aria-hidden className="size-4" />}>Enviar</Button>
               </div>
             </form>
           </section>
@@ -294,7 +301,7 @@ export function ChatPanel() {
         {data?.peers.length ? (
           <ul className="divide-y divide-line rounded-lg border border-line">
             {data.peers.map((p) => (
-              <li key={p.id}><button type="button" disabled={busy} onClick={() => void startDirect(p.id)} className="flex w-full items-center gap-2 px-3 py-2.5 text-left hover:bg-paper-deep/60"><UserRound aria-hidden className="size-4 text-ink-3" /><span className="min-w-0 flex-1"><span className="block truncate text-sm font-semibold">{p.name}</span><span className="block text-xs text-ink-3">{p.roleLabel}</span></span><MessageSquare aria-hidden className="size-4 text-ink-3" /></button></li>
+              <li key={p.id}><button type="button" disabled={busy || readOnly} onClick={() => void startDirect(p.id)} className="flex w-full items-center gap-2 px-3 py-2.5 text-left hover:bg-paper-deep/60 disabled:cursor-not-allowed disabled:opacity-60"><UserRound aria-hidden className="size-4 text-ink-3" /><span className="min-w-0 flex-1"><span className="block truncate text-sm font-semibold">{p.name}</span><span className="block text-xs text-ink-3">{p.roleLabel}</span></span><MessageSquare aria-hidden className="size-4 text-ink-3" /></button></li>
             ))}
           </ul>
         ) : <p className="rounded-lg border border-dashed border-ink/25 px-3 py-5 text-center text-sm text-ink-3">Nenhum outro colaborador cadastrado.</p>}
@@ -309,7 +316,7 @@ export function ChatPanel() {
     )}
 
     {channelForm && (
-      <Modal eyebrow="Canais de conversa" title={channelForm === "new" ? "Novo canal" : `Editar #${channelForm.name}`} onClose={() => setChannelForm(null)} width="max-w-lg" footer={<><Button variant="ghost" onClick={() => setChannelForm(null)} disabled={busy}>Cancelar</Button><Button type="submit" form="channel-form" loading={busy} disabled={channelName.trim().length < 2}>Salvar canal</Button></>}>
+      <Modal eyebrow="Canais de conversa" title={channelForm === "new" ? "Novo canal" : `Editar #${channelForm.name}`} onClose={() => setChannelForm(null)} width="max-w-lg" footer={<><Button variant="ghost" onClick={() => setChannelForm(null)} disabled={busy}>Cancelar</Button><Button type="submit" form="channel-form" loading={busy} disabled={readOnly || channelName.trim().length < 2}>Salvar canal</Button></>}>
         <form id="channel-form" onSubmit={(e) => void saveChannel(e)} className="space-y-3">
           <Field label="Nome do canal"><input className={inputCls} autoFocus value={channelName} maxLength={40} onChange={(e) => setChannelName(e.target.value)} /></Field>
           <Field label="Descrição" optional><input className={inputCls} value={channelDescription} maxLength={120} onChange={(e) => setChannelDescription(e.target.value)} /></Field>
@@ -337,13 +344,13 @@ export function ChatPanel() {
     )}
 
     {archiving && (
-      <Modal eyebrow="Conversa" title={`Arquivar #${archiving.name}?`} onClose={() => setArchiving(null)} width="max-w-lg" footer={<><Button variant="ghost" onClick={() => setArchiving(null)}>Cancelar</Button><Button variant="danger" loading={busy} onClick={async () => { setBusy(true); try { await api(`/api/chat/channels?id=${archiving.id}`, { method: "DELETE" }); setArchiving(null); await load(); toast("Canal arquivado. Histórico preservado."); } catch (e) { toast(errMsg(e), "error"); } finally { setBusy(false); } }}>Arquivar</Button></>}>
+      <Modal eyebrow="Conversa" title={`Arquivar #${archiving.name}?`} onClose={() => setArchiving(null)} width="max-w-lg" footer={<><Button variant="ghost" onClick={() => setArchiving(null)}>Cancelar</Button><Button variant="danger" loading={busy} disabled={readOnly} onClick={async () => { setBusy(true); try { await api(`/api/chat/channels?id=${archiving.id}`, { method: "DELETE" }); setArchiving(null); await load(); toast("Canal arquivado. Histórico preservado."); } catch (e) { toast(errMsg(e), "error"); } finally { setBusy(false); } }}>Arquivar</Button></>}>
         <p className="text-sm text-ink-2">O canal sai da lista, mas as mensagens ficam salvas para auditoria.</p>
       </Modal>
     )}
 
     {deleting && (
-      <Modal eyebrow="Conversa" title="Excluir mensagem?" onClose={() => setDeleting(null)} width="max-w-md" footer={<><Button variant="ghost" onClick={() => setDeleting(null)}>Cancelar</Button><Button variant="danger" onClick={async () => { try { await api(`/api/chat?id=${deleting.id}`, { method: "DELETE" }); setDeleting(null); await load(); toast("Mensagem excluída."); } catch (e) { toast(errMsg(e), "error"); } }}>Excluir</Button></>}>
+      <Modal eyebrow="Conversa" title="Excluir mensagem?" onClose={() => setDeleting(null)} width="max-w-md" footer={<><Button variant="ghost" onClick={() => setDeleting(null)}>Cancelar</Button><Button variant="danger" disabled={readOnly} onClick={async () => { try { await api(`/api/chat?id=${deleting.id}`, { method: "DELETE" }); setDeleting(null); await load(); toast("Mensagem excluída."); } catch (e) { toast(errMsg(e), "error"); } }}>Excluir</Button></>}>
         <p className="text-sm text-ink-2">A mensagem sai da conversa. A exclusão é lógica e preserva o registro no banco.</p>
       </Modal>
     )}

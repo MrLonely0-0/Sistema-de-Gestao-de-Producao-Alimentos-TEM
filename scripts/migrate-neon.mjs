@@ -339,6 +339,33 @@ async function run() {
       `);
     }
 
+    // 10) Hierarquia Admin Master / Admin Normal e limites configuráveis
+    if ((await tableExists(client, "app_state")) && !(await columnExists(client, "app_state", "admin_limits"))) {
+      console.log("• Adicionando app_state.admin_limits...");
+      await client.query(`ALTER TABLE public.app_state ADD COLUMN IF NOT EXISTS admin_limits jsonb`);
+    }
+    if (await tableExists(client, "users")) {
+      const hasSoftDelete = await columnExists(client, "users", "deleted_at");
+      const notDeleted = hasSoftDelete ? "deleted_at IS NULL AND " : "";
+      const { rows: masters } = await client.query(
+        `SELECT id FROM public.users WHERE ${notDeleted} role = 'admin_master' AND active = true LIMIT 1`,
+      );
+      if (masters.length === 0) {
+        const masterEmail = (process.env.ADMIN_MASTER_EMAIL?.trim() || process.env.ADMIN_EMAIL?.trim() || "vinicius@tem.com.br").toLowerCase();
+        const { rows: candidates } = await client.query(
+          `SELECT id FROM public.users
+           WHERE ${notDeleted} active = true AND (LOWER(email) = $1 OR role = 'admin')
+           ORDER BY CASE WHEN LOWER(email) = $1 THEN 0 ELSE 1 END, id ASC
+           LIMIT 1`,
+          [masterEmail],
+        );
+        if (candidates[0]) {
+          console.log(`• Promovendo administrador principal (id=${candidates[0].id}) para admin_master...`);
+          await client.query(`UPDATE public.users SET role = 'admin_master', updated_at = now() WHERE id = $1`, [candidates[0].id]);
+        }
+      }
+    }
+
     await client.query("COMMIT");
     console.log("✓ Pré-migração do Neon concluída com segurança. Execute agora: npx drizzle-kit push");
   } catch (err) {
