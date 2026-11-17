@@ -1,7 +1,6 @@
 import { z } from "zod";
-import { ApiError, requestToken } from "@/lib/api";
-import { getUserByToken } from "@/lib/auth";
-import type { ReportDataset } from "@/lib/domain";
+import { ApiError, resolveSessionFromRequest } from "@/lib/api";
+import { isReadOnly, type ReportDataset } from "@/lib/domain";
 import { exportContent } from "@/lib/report-export";
 import { getReports } from "@/lib/queries";
 import { parseReportFilters } from "../route";
@@ -15,8 +14,11 @@ const querySchema = z.object({
 
 export async function GET(req: Request) {
   try {
-    const user = await getUserByToken(requestToken(req));
+    const { user } = await resolveSessionFromRequest(req);
     if (!user) throw new ApiError(401, "Sua sessão expirou. Entre novamente.");
+    if (isReadOnly(user.role)) {
+      throw new ApiError(403, "Exportação desabilitada no modo visualização (somente leitura).");
+    }
     const url = new URL(req.url);
     const { dataset, format } = querySchema.parse({
       dataset: url.searchParams.get("dataset") ?? "completo",

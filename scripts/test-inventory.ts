@@ -44,14 +44,19 @@ async function makeReady(token: string, units: number) {
     productId, garlicLot: "QA-AL", preservativeLot: "QA-CS", goodUnits: units, lossUnits: 0,
     mixStart: "2026-01-01T08:00:00Z", mixEnd: "2026-01-01T08:30:00Z",
     fillStart: "2026-01-01T08:35:00Z", fillEnd: "2026-01-01T09:00:00Z",
-    finishStart: "2026-01-01T09:05:00Z", finishEnd: "2026-01-01T09:30:00Z", markReady: true,
+    markReady: true,
   })];
   await call(`/api/batches/${batch.id}/transition`, token, "POST", { action: "liberar" });
   return batch.id;
 }
 async function finish(token: string, outputs: Array<{ packagingOptionId: number; boxes: number }>, units: number) {
   const id = await makeReady(token, units);
-  await call(`/api/batches/${id}/transition`, token, "POST", { action: "finalizar", outputs });
+  await call(`/api/batches/${id}/transition`, token, "POST", {
+    action: "finalizar",
+    finishStart: "2026-01-01T09:05:00Z",
+    finishEnd: "2026-01-01T09:30:00Z",
+    outputs,
+  });
   return id;
 }
 
@@ -129,7 +134,12 @@ async function main() {
   const concurrent = await makeReady(admin, 36);
   const responses = await Promise.all([0, 1].map(() => fetch(`${base}/api/batches/${concurrent}/transition`, {
     method: "POST", headers: { "content-type": "application/json", "x-tem-client": "1", authorization: `Bearer ${admin}` },
-    body: JSON.stringify({ action: "finalizar", outputs: [{ packagingOptionId: optionId, boxes: 3 }] }),
+    body: JSON.stringify({
+      action: "finalizar",
+      finishStart: "2026-01-01T09:05:00Z",
+      finishEnd: "2026-01-01T09:30:00Z",
+      outputs: [{ packagingOptionId: optionId, boxes: 3 }],
+    }),
   })));
   assert.deepEqual(responses.map((r) => r.status).sort(), [200, 409]);
   a = await item(admin, optionId); assert.equal(a.balance, 5);

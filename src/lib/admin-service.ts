@@ -11,6 +11,7 @@ import {
   products,
 } from "@/db/schema";
 import { ApiError, pgCode } from "@/lib/api";
+import { assertAdmin } from "@/lib/access-control";
 import { BRAND_SLUG, type SessionUser } from "@/lib/domain";
 
 /* ───────────── Validação ───────────── */
@@ -51,7 +52,7 @@ export const updateProductSchema = z.object({
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 function adminOnly(user: SessionUser) {
-  if (user.role !== "admin") throw new ApiError(403, "Somente o administrador pode alterar cadastros.");
+  assertAdmin(user, "admin_produtos");
 }
 
 function slugify(value: string): string {

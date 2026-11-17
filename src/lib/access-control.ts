@@ -3,17 +3,26 @@ import { and, count, eq, isNull, ne, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { accessProfiles, sessions, users } from "@/db/schema";
 import { ApiError } from "@/lib/api";
-import type { Role, SessionUser } from "@/lib/domain";
+import { hasAdminCapability, isAnyAdmin, isMasterAdmin, type AdminCapability, type Role, type SessionUser } from "@/lib/domain";
 
 export type AccessTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
-/** Serializa mudanças administrativas para não excluir/desativar o último admin por corrida. */
+/** Serializa mudanças administrativas para não excluir/desativar o último Administrador Master por corrida. */
 export async function lockAccess(tx: AccessTx) {
   await tx.execute(sql`select pg_advisory_xact_lock(7405102)`);
 }
 
-export function assertAdmin(user: SessionUser) {
-  if (user.role !== "admin") throw new ApiError(403, "Apenas administradores podem gerenciar acessos.");
+export function assertAdmin(user: SessionUser, capability?: AdminCapability) {
+  if (!isAnyAdmin(user.role)) throw new ApiError(403, "Apenas administradores podem gerenciar esta área.");
+  if (capability && !hasAdminCapability(user, capability)) {
+    throw new ApiError(403, "Seu perfil de administrador não tem permissão para esta ação.");
+  }
+}
+
+export function assertMasterAdmin(user: SessionUser) {
+  if (!isMasterAdmin(user.role)) {
+    throw new ApiError(403, "Apenas o Administrador Master pode executar esta ação.");
+  }
 }
 
 export async function resolveRole(tx: AccessTx, role: Role) {
@@ -24,11 +33,11 @@ export async function resolveRole(tx: AccessTx, role: Role) {
   return { role, profileId: id };
 }
 
-export async function ensureAnotherAdmin(tx: AccessTx, userId: number) {
+export async function ensureAnotherMasterAdmin(tx: AccessTx, userId: number) {
   const [row] = await tx.select({ n: count() }).from(users).where(and(
-    eq(users.role, "admin"), eq(users.active, true), isNull(users.deletedAt), ne(users.id, userId),
+    eq(users.role, "admin_master"), eq(users.active, true), isNull(users.deletedAt), ne(users.id, userId),
   ));
-  if (row.n === 0) throw new ApiError(409, "É necessário manter pelo menos um administrador ativo.");
+  if (row.n === 0) throw new ApiError(409, "É necessário manter pelo menos um Administrador Master ativo.");
 }
 
 export async function revokeSessions(tx: AccessTx, userId: number, keepToken?: string | null) {

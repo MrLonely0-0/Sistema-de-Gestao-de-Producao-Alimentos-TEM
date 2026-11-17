@@ -4,7 +4,7 @@ import { db } from "@/db";
 import { shipments, stockAdjustments } from "@/db/schema";
 import { ApiError } from "@/lib/api";
 import { assertFeature } from "@/lib/columns";
-import { can, type SessionUser } from "@/lib/domain";
+import { userCan, type SessionUser } from "@/lib/domain";
 import { ensureInventoryItems, lockStockOptions, requireLiveStock, stockBalance, touchStock } from "@/lib/inventory-ledger";
 
 const reason = z.string().trim().min(3, "Informe o motivo do ajuste.").max(200);
@@ -21,7 +21,7 @@ const updateShipmentSchema = z.object({
 });
 
 async function guard(user: SessionUser) {
-  if (!can(user.role, "separar", user.permissions)) throw new ApiError(403, "Seu perfil não tem permissão para gerenciar o estoque.");
+  if (!userCan(user, "separar")) throw new ApiError(403, "Seu perfil não tem permissão para gerenciar o estoque.");
   await assertFeature("separar");
   await ensureInventoryItems();
 }

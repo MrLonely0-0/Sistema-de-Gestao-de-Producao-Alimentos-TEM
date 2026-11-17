@@ -6,15 +6,123 @@
 
 /* ───────────── Perfis ───────────── */
 
-export const ROLES = ["admin", "producao", "qualidade", "acabamento", "logistica"] as const;
+export const ROLES = ["admin_master", "admin", "producao", "qualidade", "acabamento", "logistica", "viewer"] as const;
 export type Role = (typeof ROLES)[number] | `custom:${number}`;
 
 export const ROLE_LABEL: Record<string, string> = {
+  admin_master: "Administrador Master",
   admin: "Administrador",
   producao: "Operador de Produção",
   qualidade: "Inspetor de Qualidade",
   acabamento: "Operador de Acabamento",
   logistica: "Estoque e Logística",
+  viewer: "Visualização (Demonstração)",
+};
+
+export function isMasterAdmin(role: Role): boolean {
+  return role === "admin_master";
+}
+
+export function isAnyAdmin(role: Role): boolean {
+  return role === "admin_master" || role === "admin";
+}
+
+export function isReadOnly(role: Role): boolean {
+  return role === "viewer";
+}
+
+export const ADMIN_CAPABILITIES = [
+  "admin_produtos",
+  "admin_paineis",
+  "admin_perfis",
+  "admin_usuarios",
+  "admin_drive",
+  "admin_visual",
+  "admin_dados",
+  "estoque_itens",
+  "excluir_bateladas",
+  "moderar_chat",
+  "operar_fluxo",
+] as const;
+export type AdminCapability = (typeof ADMIN_CAPABILITIES)[number];
+
+export interface AdminLimits {
+  capabilities: AdminCapability[];
+}
+
+export const DEFAULT_ADMIN_LIMITS: AdminLimits = {
+  capabilities: [...ADMIN_CAPABILITIES],
+};
+
+export const ADMIN_TAB_CAPABILITIES: readonly AdminCapability[] = [
+  "admin_produtos",
+  "admin_paineis",
+  "admin_perfis",
+  "admin_usuarios",
+  "admin_drive",
+  "admin_visual",
+  "admin_dados",
+];
+
+export const ADMIN_CAPABILITY_META: Record<
+  AdminCapability,
+  { label: string; description: string; group: "admin" | "sistema" }
+> = {
+  admin_produtos: {
+    label: "Produtos e classificações",
+    description: "Criar, editar e excluir produtos, embalagens, classificações e alterar em massa.",
+    group: "admin",
+  },
+  admin_paineis: {
+    label: "Painéis do quadro",
+    description: "Configurar colunas, ordem, funcionalidades e regra de múltiplas gramaturas.",
+    group: "admin",
+  },
+  admin_perfis: {
+    label: "Perfis de acesso",
+    description: "Criar, editar e excluir perfis personalizados.",
+    group: "admin",
+  },
+  admin_usuarios: {
+    label: "Usuários (operacionais e visualização)",
+    description: "Criar, editar e desativar contas não-administradoras. Nunca altera ADM ou Master.",
+    group: "admin",
+  },
+  admin_drive: {
+    label: "Google Drive",
+    description: "Visualizar pastas geradas por batelada.",
+    group: "admin",
+  },
+  admin_visual: {
+    label: "Identidade visual",
+    description: "Alterar imagem de abertura e favicons.",
+    group: "admin",
+  },
+  admin_dados: {
+    label: "Dados do sistema",
+    description: "Consultar prévia e limpar dados de demonstração.",
+    group: "admin",
+  },
+  estoque_itens: {
+    label: "Gerenciar itens do estoque",
+    description: "Criar, editar saldo e excluir itens manualmente em Estoque.",
+    group: "sistema",
+  },
+  excluir_bateladas: {
+    label: "Excluir bateladas e anexos",
+    description: "Excluir bateladas no painel e remover anexos de outros usuários.",
+    group: "sistema",
+  },
+  moderar_chat: {
+    label: "Gerenciar canais e moderar conversa",
+    description: "Criar, renomear e arquivar canais e moderar mensagens no Chat.",
+    group: "sistema",
+  },
+  operar_fluxo: {
+    label: "Executar ações operacionais no painel",
+    description: "Criar bateladas, marcar pronto, liberar, reter, finalizar caixas e separar estoque.",
+    group: "sistema",
+  },
 };
 
 export function roleLabel(role: Role, profiles: Array<{ id: number; name: string }> = []): string {
@@ -29,8 +137,24 @@ export interface SessionUser {
   role: Role;
   profileName?: string;
   permissions?: Action[];
+  adminCapabilities?: AdminCapability[];
   avatarUrl?: string | null;
   bio?: string | null;
+}
+
+export function hasAdminCapability(
+  user: Pick<SessionUser, "role" | "adminCapabilities">,
+  cap: AdminCapability,
+): boolean {
+  if (user.role === "admin_master") return true;
+  if (user.role !== "admin") return false;
+  return (user.adminCapabilities ?? ADMIN_CAPABILITIES).includes(cap);
+}
+
+export function canOpenAdmin(user: Pick<SessionUser, "role" | "adminCapabilities">): boolean {
+  if (user.role === "admin_master" || user.role === "viewer") return true;
+  if (user.role === "admin") return ADMIN_TAB_CAPABILITIES.some((cap) => hasAdminCapability(user, cap));
+  return false;
 }
 
 export interface MyProfileDTO extends SessionUser {
@@ -201,20 +325,43 @@ export const TRANSITIONS: Record<TransitionAction, { from: Status[]; to: Status 
   finalizar: { from: ["liberado"], to: "em_estoque" },
 };
 
-export function can(role: Role, action: Action, permissions: readonly Action[] = []): boolean {
-  if (role === "admin") return true;
+export function can(
+  role: Role,
+  action: Action,
+  permissions: readonly Action[] = [],
+  adminCapabilities?: readonly AdminCapability[],
+): boolean {
+  if (role === "admin_master") return true;
+  if (role === "viewer") return false;
+  if (role === "admin") return (adminCapabilities ?? ADMIN_CAPABILITIES).includes("operar_fluxo");
   if (role.startsWith("custom:")) return permissions.includes(action);
   return ACTION_ROLE[action] === role;
+}
+
+export function userCan(user: Pick<SessionUser, "role" | "permissions" | "adminCapabilities">, action: Action): boolean {
+  return can(user.role, action, user.permissions, user.adminCapabilities);
 }
 
 export const ATTACHMENT_KINDS = ["laudo", "foto"] as const;
 export type AttachmentKind = (typeof ATTACHMENT_KINDS)[number];
 
 /** Anexos: a Qualidade pode anexar sempre; os demais só enquanto o card está na sua coluna. */
-export function canAttach(role: Role, status: Status, permissions: readonly Action[] = []): boolean {
-  if (role === "admin" || role === "qualidade") return true;
+export function canAttach(
+  role: Role,
+  status: Status,
+  permissions: readonly Action[] = [],
+  adminCapabilities?: readonly AdminCapability[],
+): boolean {
+  if (role === "admin_master") return true;
+  if (role === "viewer") return false;
+  if (role === "admin") return (adminCapabilities ?? ADMIN_CAPABILITIES).includes("operar_fluxo");
+  if (role === "qualidade") return true;
   if (role.startsWith("custom:")) return permissions.includes("anexar");
   return STAGE_META[STAGE_OF[status]].role === role && role !== "logistica";
+}
+
+export function userCanAttach(user: Pick<SessionUser, "role" | "permissions" | "adminCapabilities">, status: Status): boolean {
+  return canAttach(user.role, status, user.permissions, user.adminCapabilities);
 }
 
 /* ───────────── Checklist para marcar "Pronto" ───────────── */
@@ -234,11 +381,18 @@ export interface ProductionData {
   lossUnits: number | null;
 }
 
-export const PROCESS_STEPS = [
+export const PRODUCTION_STEPS = [
   { key: "mix", label: "Mistura", start: "mixStart", end: "mixEnd" },
   { key: "fill", label: "Envase", start: "fillStart", end: "fillEnd" },
-  { key: "finish", label: "Acabamento", start: "finishStart", end: "finishEnd" },
 ] as const;
+
+export const FINISH_STEP = { key: "finish", label: "Acabamento", start: "finishStart", end: "finishEnd" } as const;
+
+export const PROCESS_STEPS = [...PRODUCTION_STEPS, FINISH_STEP] as const;
+
+export function stepsForStatus(status: Status) {
+  return status === "liberado" || status === "em_estoque" ? PROCESS_STEPS : PRODUCTION_STEPS;
+}
 
 const ms = (m: Moment) => (m ? new Date(m).getTime() : null);
 
@@ -255,19 +409,36 @@ export function timeOrderErrors(d: ProductionData): string[] {
   return errors;
 }
 
-export const READY_TOTAL = 10;
+export function finishOrderError(d: Pick<ProductionData, "finishStart" | "finishEnd">): string | null {
+  const a = ms(d.finishStart);
+  const b = ms(d.finishEnd);
+  if (a !== null && b !== null && b < a) {
+    return "O fim de acabamento não pode ser anterior ao início.";
+  }
+  return null;
+}
 
-/** Campos que ainda faltam para a batelada poder ir para "Pronto". */
+export const READY_TOTAL = 8;
+
+/** Campos que ainda faltam para a batelada poder ir para "Pronto" (Produção: Mistura e Envase). */
 export function missingForReady(d: ProductionData): string[] {
   const missing: string[] = [];
   if (!d.garlicLot) missing.push("Lote de alho");
   if (!d.preservativeLot) missing.push("Lote de conservante");
-  for (const step of PROCESS_STEPS) {
+  for (const step of PRODUCTION_STEPS) {
     if (!d[step.start]) missing.push(`Início de ${step.label.toLowerCase()}`);
     if (!d[step.end]) missing.push(`Fim de ${step.label.toLowerCase()}`);
   }
   if (d.goodUnits === null || d.goodUnits === undefined || d.goodUnits < 1) missing.push("Unidades boas");
   if (d.lossUnits === null || d.lossUnits === undefined) missing.push("Perdas");
+  return missing;
+}
+
+/** Campos obrigatórios na etapa de Acabamento para finalizar e enviar ao estoque. */
+export function missingForFinish(d: Pick<ProductionData, "finishStart" | "finishEnd">): string[] {
+  const missing: string[] = [];
+  if (!d.finishStart) missing.push("Início de acabamento");
+  if (!d.finishEnd) missing.push("Fim de acabamento");
   return missing;
 }
 
@@ -670,6 +841,7 @@ export interface AdminOverviewDTO {
   dimensions: DimensionDTO[];
   columns: ColumnDTO[];
   allowMultiFormatBatch: boolean;
+  adminLimits: AdminLimits;
   drive: {
     mode: "simulado";
     root: string;
